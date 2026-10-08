@@ -202,12 +202,13 @@ a { color: inherit; }
 .test-body { padding: 7px 8px 8px; display: flex; flex-direction: column; gap: 7px; }
 .test.collapsed .test-body { display: none; }
 
-.io { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; }
+.io { display: grid; grid-template-columns: minmax(0, 68fr) minmax(0, 32fr); gap: 6px; }
 .label { color: var(--sub); font-size: .85em; margin-bottom: 2px; display: block; }
 textarea, pre { width: 100%; margin: 0; padding: 4px 6px; border-radius: 3px; border: 1px solid var(--surface);
   background: var(--vscode-input-background); color: var(--vscode-input-foreground);
   font: 12px/1.4 var(--vscode-editor-font-family); }
-textarea { resize: none; display: block; overflow: auto; white-space: pre; }
+/* Long sample lines wrap: a horizontal scrollbar would cover a short box. */
+textarea { resize: none; display: block; white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden; overflow-y: auto; min-height: calc(2 * 1.4em + 10px); }
 textarea:focus { outline: none; border-color: var(--accent); }
 pre { white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
 .line-bad { background: color-mix(in srgb, var(--wa) 25%, transparent); display: inline-block; width: 100%; }
@@ -297,6 +298,16 @@ function testHtml(t, i) {
     "</div>" + out + "</div></section>";
 }
 
+/** Sizes each input/expected pair to its wrapped content, both the same height. */
+function fit(io) {
+  const boxes = io.querySelectorAll("textarea");
+  boxes.forEach((t) => (t.style.height = "auto"));
+  const h = Math.min(300, Math.max(...Array.from(boxes, (t) => t.scrollHeight + 2)));
+  boxes.forEach((t) => (t.style.height = h + "px"));
+}
+function fitAll() { app.querySelectorAll(".io").forEach(fit); }
+window.addEventListener("resize", fitAll);
+
 function lines(s) { return String(s).replace(/\\n+$/, "").split("\\n").length; }
 
 function render() {
@@ -333,6 +344,7 @@ function render() {
     '<div class="body">' + body + "</div>" +
     '<div class="bar"><button class="primary" data-act="run"' + (busy ? " disabled" : "") + ">" + (busy ? "Running…" : "Run all") + "</button>" +
     '<button data-act="submit">Submit</button></div>';
+  fitAll();
 }
 
 function tests() {
@@ -362,6 +374,7 @@ app.addEventListener("input", (e) => {
   const el = e.target;
   if (el.tagName !== "TEXTAREA") return;
   state.tests[Number(el.dataset.i)][el.dataset.k] = el.value;
+  fit(el.closest(".io"));
 });
 app.addEventListener("change", (e) => {
   if (e.target.tagName === "TEXTAREA") send("save", { tests: tests() });

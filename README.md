@@ -32,12 +32,14 @@ Everything is cached locally in SQLite, so browsing 20,000+ problems is instant 
 
 - 🗂️ **Every problem, one list**: Codeforces, CSES, and AtCoder, filterable with `/`.
 - 🎯 **Practice that explains itself**: seven pick modes, and every pick says *why* it was chosen.
+- 🥅 **Goal plans**: pick a rank, see which topics are ready for it, and get a rung-by-rung problem ladder.
 - 📖 **Statements in the terminal**: headings, lists, sample boxes, and readable math.
 - 🧪 **Local judge**: per-sample verdicts, timing, and time limits that really stop runaway programs.
+- 🔨 **Stress testing**: `cpx stress` compares your solution with a brute force on generated inputs.
 - 🏆 **Contests**: upcoming and running Codeforces rounds with live countdowns.
 - 📈 **Analytics**: rating history, a 12-week activity heatmap, and your strongest and weakest topics.
 - 🏠 **Dashboard**: current rating, distance to the next rank, streak, recent verdicts.
-- 🎨 **Catppuccin**: Mocha by default, Latte for light terminals.
+- 🎨 **Themes**: Catppuccin Mocha by default, Latte for light terminals, and more accents with `T`.
 - 🧩 **VS Code extension**: the same run-and-submit loop inside your editor, no terminal app needed.
 
 ### Practice modes
@@ -68,7 +70,7 @@ Prebuilt binaries for Windows, Linux, and macOS (Intel and Apple Silicon) are at
 ## Quick start
 
 ```sh
-cpx            # first run asks for your Codeforces handle, language, workspace, editor
+cpx            # first run asks for your handle, language, workspace, editor, template, CSES login
 cpx sync       # pull problems, contests, your submissions and rating into the cache
 cpx            # go
 ```
@@ -78,10 +80,12 @@ cpx            # go
 | `cpx` | Open the app |
 | `cpx sync` | Refresh problems, contests, submissions, and ratings |
 | `cpx setup` | Run the setup questions again |
+| `cpx stress sol.cpp brute.cpp gen.cpp [runs]` | Run both programs on generated inputs until they disagree. The generator gets the seed as its argument |
+| `cpx update` | Install the newest release build |
 
 **Keys:** `j/k` move · `tab` switch tab · `/` filter · `p` judge · `c` clear filter · `m` practice mode ·
-`[` `]` practice target · `o` open · `t` test · `s` submit · `v` statement · `d/u` scroll · `b` browser ·
-`r` refresh · `q` quit
+`[` `]` practice target or goal · `o` open · `t` test · `s` submit · `v` statement · `d/u` scroll · `b` browser ·
+`r` refresh · `T` theme · `q` quit
 
 **Filter** (`/`) takes any mix of terms: `@cf` / `@cses` / `@atcoder`, a rating range like `1200-1600`,
 `1600+` or `-1400`, tags like `#dp` (`#dp,greedy` for either), and plain words.

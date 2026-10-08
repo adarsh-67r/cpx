@@ -1,9 +1,15 @@
-// Catppuccin palette and the styles every view renders with. "catppuccin" is
-// the default (Mocha, the dark flavor).
+// Palettes and the styles every view renders with. All four Catppuccin
+// flavors, plus a grayscale "mono". "catppuccin" (Mocha) is the default.
 
 use ratatui::style::{Color, Modifier, Style};
 
-pub const THEMES: [&str; 3] = ["catppuccin", "auto", "light"];
+pub const THEMES: [&str; 6] = ["catppuccin", "auto", "light", "macchiato", "frappe", "mono"];
+
+/// The theme after name in THEMES, wrapping; T in the app cycles with it.
+pub fn next(name: &str) -> &'static str {
+    let i = THEMES.iter().position(|n| *n == name).unwrap_or(0);
+    THEMES[(i + 1) % THEMES.len()]
+}
 
 #[derive(Clone, Copy)]
 struct Palette {
@@ -42,6 +48,61 @@ const LATTE: Palette = Palette {
     yellow: Color::Rgb(0xdf, 0x8e, 0x1d),
 };
 
+const fn rgb(c: u32) -> Color {
+    Color::Rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
+}
+
+const MACCHIATO: Palette = Palette {
+    base: rgb(0x24273a),
+    text: rgb(0xcad3f5),
+    subtext: rgb(0xa5adcb),
+    muted: rgb(0x6e738d),
+    surface: rgb(0x363a4f),
+    mauve: rgb(0xc6a0f6),
+    green: rgb(0xa6da95),
+    red: rgb(0xed8796),
+    yellow: rgb(0xeed49f),
+};
+
+const FRAPPE: Palette = Palette {
+    base: rgb(0x303446),
+    text: rgb(0xc6d0f5),
+    subtext: rgb(0xa5adce),
+    muted: rgb(0x737994),
+    surface: rgb(0x414559),
+    mauve: rgb(0xca9ee6),
+    green: rgb(0xa6d189),
+    red: rgb(0xe78284),
+    yellow: rgb(0xe5c890),
+};
+
+const MONO: Palette = Palette {
+    base: rgb(0x121212),
+    text: rgb(0xdcdcdc),
+    subtext: rgb(0xaaaaaa),
+    muted: rgb(0x7a7a7a),
+    surface: rgb(0x2a2a2a),
+    mauve: rgb(0xffffff),
+    green: rgb(0xc8c8c8),
+    red: rgb(0xffffff),
+    yellow: rgb(0xe6e6e6),
+};
+
+/// Rank colors for a problem rating, from the Catppuccin accents in the
+/// Codeforces order (gray, green, teal, blue, mauve, peach, red); 0 is unrated.
+pub fn rating_color(rating: i64) -> Color {
+    rgb(match rating {
+        0 => 0x6c7086,
+        r if r < 1200 => 0x9399b2,
+        r if r < 1400 => 0xa6e3a1,
+        r if r < 1600 => 0x94e2d5,
+        r if r < 1900 => 0x89b4fa,
+        r if r < 2100 => 0xcba6f7,
+        r if r < 2400 => 0xfab387,
+        _ => 0xf38ba8,
+    })
+}
+
 /// Every style a view needs, plus the frame background.
 pub struct Theme {
     pub bg: Color,
@@ -57,6 +118,8 @@ pub struct Theme {
     pub pane_border: Style,
     #[allow(dead_code)]
     pub key: Style,
+    /// False on mono, which keeps ratings gray.
+    pub rating_colors: bool,
 }
 
 /// Builds the styles for the named theme. "auto" and an unknown name fall
@@ -68,6 +131,9 @@ pub struct Theme {
 pub fn apply(name: &str) -> Theme {
     let p = match name {
         "light" => LATTE,
+        "macchiato" => MACCHIATO,
+        "frappe" => FRAPPE,
+        "mono" => MONO,
         _ => MOCHA,
     };
     let bg = p.base;
@@ -84,5 +150,21 @@ pub fn apply(name: &str) -> Theme {
         active: Style::default().fg(p.yellow).bg(bg).add_modifier(Modifier::BOLD),
         pane_border: Style::default().fg(p.surface).bg(bg),
         key: Style::default().fg(p.mauve).bg(bg).add_modifier(Modifier::BOLD),
+        rating_colors: name != "mono",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_cycles_through_every_theme() {
+        let mut name = THEMES[0];
+        for _ in 0..THEMES.len() {
+            name = next(name);
+        }
+        assert_eq!(name, THEMES[0]);
+        assert_eq!(next("unknown"), THEMES[1]);
     }
 }

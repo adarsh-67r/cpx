@@ -1,4 +1,4 @@
-// The full-width statement pane: cpos's block/spacing model rendered as
+// The full-width statement pane: the statement blocks rendered as
 // styled lines, with a cached copy on disk per problem.
 
 use crate::config::Config;
@@ -46,7 +46,7 @@ fn spacer(out: &mut Vec<LLine>, text_style: ratatui::style::Style) {
     }
 }
 
-/// Lays out the statement blocks with cpos's spacing: one blank line between
+/// Lays out the statement blocks with even spacing: one blank line between
 /// blocks, headings with a rule, centered titles and metadata, and the sample
 /// boxes before the Note section.
 pub fn build_page(blocks: &[Block], samples: &[Sample], width: usize, t: &Theme) -> Vec<LLine> {

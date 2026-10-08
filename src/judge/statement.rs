@@ -1,4 +1,4 @@
-// Statements as typed blocks, the way cpos keeps them. The parsers say what
+// Statements as typed blocks. The parsers say what
 // each piece is (title, metadata, heading, paragraph, formula, item, code),
 // and the terminal view decides the spacing.
 

@@ -66,13 +66,14 @@ pub struct Deps {
 pub enum Tab {
     Problems,
     Practice,
+    Goal,
     Contests,
     Analytics,
     Dashboard,
     Config,
 }
 
-const TABS: [Tab; 6] = [Tab::Problems, Tab::Practice, Tab::Contests, Tab::Analytics, Tab::Dashboard, Tab::Config];
+const TABS: [Tab; 7] = [Tab::Problems, Tab::Practice, Tab::Goal, Tab::Contests, Tab::Analytics, Tab::Dashboard, Tab::Config];
 
 impl Tab {
     fn index(self) -> usize {
@@ -94,6 +95,11 @@ pub struct Model {
     mode: usize,
     /// Practice target rating set with [ and ]; 0 follows the current rating.
     target: i64,
+    /// Goal tab rating set with [ and ]; 0 means the next rank milestone.
+    goal: i64,
+    plan: Option<crate::target::Plan>,
+    /// Problem key to true when accepted, false when only attempted.
+    solved: std::collections::HashMap<String, bool>,
     cursor: usize,
 
     filtering: bool,
@@ -201,6 +207,9 @@ impl Model {
             up_next: Vec::new(),
             mode: 0,
             target: 0,
+            goal: 0,
+            plan: None,
+            solved: Default::default(),
             cursor: 0,
             filtering: false,
             filter: String::new(),
@@ -223,8 +232,16 @@ impl Model {
             spin: 0,
         };
         m.apply_filter();
-        m.up_next = practice::recommend(&m.practice_input(), practice::Mode::Auto, 5);
+        m.refresh_derived();
         m
+    }
+
+    /// Recomputes what depends on the synced data: solve marks and Up next.
+    fn refresh_derived(&mut self) {
+        let input = self.practice_input();
+        self.solved = input.attempted.keys().map(|k| (k.clone(), input.accepted.contains(k))).collect();
+        self.solved.extend(input.accepted.iter().map(|k| (k.clone(), true)));
+        self.up_next = practice::recommend(&input, practice::Mode::Auto, 5);
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -309,8 +326,8 @@ impl Model {
                 let n = deps.problems.len();
                 self.deps = deps;
                 self.apply_filter();
-                self.up_next = practice::recommend(&self.practice_input(), practice::Mode::Auto, 5);
-                if self.tab == Tab::Practice {
+                self.refresh_derived();
+                if self.is_pick_tab() {
                     self.recompute_picks();
                 }
                 self.status = format!("Refreshed · {n} problems");
@@ -435,6 +452,11 @@ impl Model {
         match token.as_str() {
             "q" | "ctrl+c" => self.quit = true,
             "tab" => self.switch_tab(),
+            "T" => {
+                self.deps.config.theme = theme::next(&self.deps.config.theme).to_string();
+                let name = self.deps.config.theme.clone();
+                self.after_config_change(&format!("Theme {name}"));
+            }
             "m" => self.cycle_mode(),
             "j" | "down" => {
                 if self.cursor + 1 < self.row_count() {
@@ -468,6 +490,11 @@ impl Model {
                 self.target = (current + if token == "]" { 100 } else { -100 }).clamp(800, 3500);
                 self.recompute_picks();
             }
+            "[" | "]" if self.tab == Tab::Goal => {
+                let current = self.plan.as_ref().map(|p| p.target).unwrap_or(0);
+                self.goal = crate::target::cycle_milestone(current, if token == "]" { 1 } else { -1 });
+                self.recompute_picks();
+            }
             "c" if self.tab == Tab::Problems => {
                 self.filter.clear();
                 self.apply_filter();
@@ -490,9 +517,9 @@ impl Model {
 
     fn do_open(&mut self) {
         let Some(p) = self.selected() else { return };
-        let (cfg, root) = (self.deps.config.clone(), self.deps.root.clone());
+        let (cfg, root, dir) = (self.deps.config.clone(), self.deps.root.clone(), self.deps.config_dir.clone());
         self.spawn(format!("Opening {}…", p.id), move |tx| {
-            let _ = tx.send(Msg::Opened(open_solution(&cfg, &root, &p)));
+            let _ = tx.send(Msg::Opened(open_solution(&cfg, &root, &dir, &p)));
         });
     }
 
@@ -545,7 +572,7 @@ impl Model {
     fn switch_tab(&mut self) {
         self.stmt_open = false;
         self.tab = self.tab.next();
-        if self.tab == Tab::Practice {
+        if self.is_pick_tab() {
             self.recompute_picks();
         }
         self.cursor = 0;
@@ -557,7 +584,7 @@ impl Model {
 
     fn row_count(&self) -> usize {
         match self.tab {
-            Tab::Practice => self.picks.len(),
+            Tab::Practice | Tab::Goal => self.picks.len(),
             Tab::Problems => self.visible.len(),
             Tab::Contests => contests_view::upcoming(&self.deps.contests, Utc::now().timestamp()).len(),
             Tab::Config => config_view::FIELDS.len(),
@@ -565,8 +592,30 @@ impl Model {
         }
     }
 
+    /// Tabs whose rows are self.picks.
+    fn is_pick_tab(&self) -> bool {
+        matches!(self.tab, Tab::Practice | Tab::Goal)
+    }
+
     fn recompute_picks(&mut self) {
         let input = self.practice_input();
+        if self.tab == Tab::Goal {
+            let goal = if self.goal > 0 { self.goal } else { crate::target::next_milestone(input.rating) };
+            let plan = crate::target::analyze(&input, goal);
+            self.picks = plan
+                .steps
+                .iter()
+                .map(|s| practice::Pick {
+                    problem: s.problem.clone(),
+                    score: 0.0,
+                    reasons: vec![format!("Rung {}/{} · trains {}", s.rung, s.rungs, s.tag)],
+                })
+                .collect();
+            self.plan = Some(plan);
+            self.cursor = 0;
+            self.status = format!("Goal plan: {} problems · [ ] change goal", self.picks.len());
+            return;
+        }
         let mode = practice::MODES[self.mode];
         self.picks = practice::recommend(&input, mode, 30);
         self.cursor = 0;
@@ -621,20 +670,20 @@ impl Model {
     }
 
     fn selected(&self) -> Option<Problem> {
-        if self.tab != Tab::Problems && self.tab != Tab::Practice {
+        if self.tab != Tab::Problems && !self.is_pick_tab() {
             return None;
         }
         if self.cursor >= self.row_count() {
             return None;
         }
-        if self.tab == Tab::Practice {
+        if self.is_pick_tab() {
             return Some(self.picks[self.cursor].problem.clone());
         }
         Some(self.deps.problems[self.visible[self.cursor]].clone())
     }
 
     fn row_problem(&self, i: usize) -> Problem {
-        if self.tab == Tab::Practice {
+        if self.is_pick_tab() {
             self.picks[i].problem.clone()
         } else {
             self.deps.problems[self.visible[i]].clone()
@@ -712,11 +761,11 @@ fn language(cfg: &Config) -> Result<&crate::config::CompileCommand> {
 
 /// Creates the solution from a template if missing, saves samples, and opens
 /// the file in the editor. An existing solution is never overwritten.
-fn open_solution(cfg: &Config, root: &Path, p: &Problem) -> Result<(PathBuf, usize)> {
+fn open_solution(cfg: &Config, root: &Path, config_dir: &Path, p: &Problem) -> Result<(PathBuf, usize)> {
     let cc = language(cfg)?;
     let path = workspace::solution_path(root, p, &cc.extension);
-    let tpl = workspace::template(&cfg.default_language);
-    workspace::scaffold(&path, tpl)?;
+    let own = workspace::user_template(config_dir, &cfg.default_language, &cc.extension);
+    workspace::scaffold(&path, own.as_deref().unwrap_or(workspace::template(&cfg.default_language)))?;
 
     let mut samples = workspace::load_samples(&path)?;
     if samples.is_empty() {

@@ -38,6 +38,11 @@ pub fn template(lang: &str) -> &'static str {
     }
 }
 
+/// The user's own template, saved by setup as <config dir>/templates/<lang><ext>.
+pub fn user_template(config_dir: &Path, lang: &str, ext: &str) -> Option<String> {
+    fs::read_to_string(config_dir.join("templates").join(format!("{lang}{ext}"))).ok()
+}
+
 /// The workspace root: the configured folder, or ~/cpx when none is set.
 pub fn root(cfg: &Config) -> Result<PathBuf> {
     if !cfg.workspace_dir.is_empty() {

@@ -37,6 +37,16 @@ pub fn normalize(s: &str) -> String {
 /// Builds (if the language needs it), then runs every sample. A compile
 /// failure is an error; a bad sample is reported in its result.
 pub fn run_samples(spec: &Spec<'_>, samples: &[Sample], time_limit: Duration) -> Result<Vec<CaseResult>> {
+    let line = build(spec)?;
+    Ok(samples
+        .iter()
+        .enumerate()
+        .map(|(i, s)| run_one(&line, spec.dir, i + 1, s, time_limit))
+        .collect())
+}
+
+/// Compiles spec's source if its language needs it, and returns the command line that runs it.
+pub fn build(spec: &Spec<'_>) -> Result<String> {
     let output = spec.source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     if !spec.compile.trim().is_empty() {
         let line = expand(spec.compile, spec.source, &output, spec.dir);
@@ -48,15 +58,11 @@ pub fn run_samples(spec: &Spec<'_>, samples: &[Sample], time_limit: Duration) ->
         }
     }
 
-    let line = expand(spec.run, spec.source, &output, spec.dir);
-    Ok(samples
-        .iter()
-        .enumerate()
-        .map(|(i, s)| run_one(&line, spec.dir, i + 1, s, time_limit))
-        .collect())
+    Ok(expand(spec.run, spec.source, &output, spec.dir))
 }
 
-fn run_one(line: &str, dir: &Path, index: usize, s: &Sample, limit: Duration) -> CaseResult {
+/// Runs one built command line on s.input and compares with s.output.
+pub fn run_one(line: &str, dir: &Path, index: usize, s: &Sample, limit: Duration) -> CaseResult {
     let mut res = CaseResult {
         index,
         passed: false,

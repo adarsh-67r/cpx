@@ -4,7 +4,7 @@
 use crate::practice;
 use crate::problem::Problem;
 use crate::tui::text::{self, LLine};
-use crate::tui::theme::Theme;
+use crate::tui::theme::{self, Theme};
 use crate::tui::{config_view, contests_view, statement_view, stats_view};
 use crate::tui::{Model, Tab};
 use chrono::Utc;
@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Padding, Paragraph};
 use ratatui::Frame;
 
-const KEYS_HINT: &str = "j/k move · tab switch · / filter · p judge · c clear · m mode · o open · t test · s submit · v statement · d/u scroll · b browser · r refresh · q quit";
+const KEYS_HINT: &str = "j/k move · tab switch · / filter · p judge · c clear · m mode · o open · t test · s submit · v statement · d/u scroll · b browser · r refresh · T theme · q quit";
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn draw(f: &mut Frame, m: &Model) {
@@ -64,7 +64,7 @@ fn render_muted(f: &mut Frame, area: Rect, lines: &[String], t: &Theme) {
 fn build_header(m: &Model) -> (Vec<Line<'static>>, u16) {
     let t = &m.theme;
     let mut spans = vec![Span::styled("CPX", t.title), Span::raw("  ")];
-    let tabs = ["Problems", "Practice", "Contests", "Analytics", "Dashboard", "Config"];
+    let tabs = ["Problems", "Practice", "Goal", "Contests", "Analytics", "Dashboard", "Config"];
     for (i, name) in tabs.iter().enumerate() {
         if i == m.tab.index() {
             spans.push(Span::styled(format!("[{name}]"), t.active));
@@ -77,6 +77,8 @@ fn build_header(m: &Model) -> (Vec<Line<'static>>, u16) {
         let rating = m.deps.rating_changes.last().map(|r| r.new_rating).unwrap_or(0);
         let target = if m.target > 0 { m.target } else { practice::default_target(rating) };
         spans.push(Span::styled(format!("  mode: {}  target: {target}  [ ] change", practice::MODES[m.mode].label()), t.muted));
+    } else if let (Tab::Goal, Some(p)) = (m.tab, &m.plan) {
+        spans.push(Span::styled(format!("  goal: {} {}  ready {}%  [ ] change", p.target, p.target_rank, p.readiness_pct), t.muted));
     } else if m.tab == Tab::Problems {
         spans.push(Span::styled(format!("  {}/{}", m.visible.len(), m.deps.problems.len()), t.muted));
     }
@@ -155,7 +157,11 @@ fn render_list_pane(f: &mut Frame, area: Rect, m: &Model, t: &Theme) {
 
     let n = m.row_count();
     if n == 0 {
-        let msg = if m.tab == Tab::Practice { "No picks for this mode. Press m for another." } else { "No matches." };
+        let msg = match m.tab {
+            Tab::Practice => "No picks for this mode. Press m for another.",
+            Tab::Goal => "No unsolved Codeforces problems for this goal. Sync (r) or press [ ] for another goal.",
+            _ => "No matches.",
+        };
         f.render_widget(Paragraph::new(Line::from(Span::styled(msg, t.muted))), inner);
         return;
     }
@@ -164,10 +170,22 @@ fn render_list_pane(f: &mut Frame, area: Rect, m: &Model, t: &Theme) {
     let items: Vec<ListItem> = (0..n)
         .map(|i| {
             let p = m.row_problem(i);
-            let label = text::truncate(&format!("{:<8} {:<6} {}", p.id, rating_label(&p), p.name), width);
             let style = if i == m.cursor { t.select } else { t.text };
             let prefix = if i == m.cursor { "▸ " } else { "  " };
-            ListItem::new(Line::from(Span::styled(format!("{prefix}{label}"), style)))
+            let rating_style = if t.rating_colors { style.fg(theme::rating_color(p.rating)) } else { style };
+            let rest = text::truncate(&format!(" {}", p.name), width.saturating_sub(18));
+            let (mark, mark_style) = match m.solved.get(&practice::key(&p)) {
+                Some(true) => ("● ", style.fg(t.pass.fg.unwrap_or_default())),
+                Some(false) => ("◐ ", style.fg(t.active.fg.unwrap_or_default())),
+                None => ("○ ", style.fg(t.muted.fg.unwrap_or_default())),
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(mark, mark_style),
+                Span::styled(format!("{:<8} ", p.id), style),
+                Span::styled(format!("{:<6}", rating_label(&p)), rating_style),
+                Span::styled(rest, style),
+            ]))
         })
         .collect();
     let mut state = ListState::default();
@@ -215,11 +233,29 @@ fn render_detail(m: &Model, t: &Theme, width: usize) -> Vec<LLine> {
         out.push(LLine::new(p.tags.join(", "), t.sub));
     }
 
-    if m.tab == Tab::Practice {
+    if m.tab == Tab::Practice || m.tab == Tab::Goal {
         out.push(LLine::new(String::new(), t.text));
         out.push(LLine::new("Why this pick", t.bold));
         for r in &m.picks[m.cursor].reasons {
             out.push(LLine::new(format!("· {r}"), t.sub));
+        }
+    }
+
+    if let (Tab::Goal, Some(plan)) = (m.tab, &m.plan) {
+        out.push(LLine::new(String::new(), t.text));
+        let rating = if plan.rating > 0 { format!("rating {}", plan.rating) } else { "unrated".to_string() };
+        out.push(LLine::new(format!("Goal {} {}  ·  {rating}  ·  {}% ready", plan.target, plan.target_rank, plan.readiness_pct), t.bold));
+        out.push(LLine::new(String::new(), t.text));
+        out.push(LLine::new("Topics to work on  (skill · share of problems near the goal)", t.bold));
+        if plan.focus.is_empty() {
+            out.push(LLine::new("Every common topic at this goal looks ready.", t.muted));
+        }
+        for tp in &plan.focus {
+            let skill = if tp.skill > 0 { tp.skill.to_string() } else { "—".to_string() };
+            out.push(LLine::new(
+                text::truncate(&format!("  {:<24} {:<6} {:>5} {:>4.0}%", tp.tag, tp.status.label(), skill, tp.share * 100.0), width),
+                t.text,
+            ));
         }
     }
 
