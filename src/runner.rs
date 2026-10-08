@@ -147,7 +147,8 @@ fn kill_tree(child: &mut std::process::Child) {
     } else {
         // shell() put the child in its own process group; -pid is that group.
         let mut c = Command::new("kill");
-        c.args(["-KILL", &format!("-{pid}")]);
+        // "--" so procps kill reads -pid as a target, not an option.
+        c.args(["-s", "KILL", "--", &format!("-{pid}")]);
         c
     };
     let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
