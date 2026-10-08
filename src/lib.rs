@@ -5,6 +5,7 @@ pub mod practice;
 pub mod problem;
 pub mod runner;
 pub mod setup;
+pub mod sync;
 pub mod stats;
 pub mod tui;
 pub mod workspace;

@@ -1,7 +1,8 @@
 // Parsers for judge problem pages. Each returns the title, the sample tests,
-// and the statement as plain text. They match the Go core's parsers.
+// and the statement as plain text and as cleaned HTML.
 
 import * as cheerio from "cheerio";
+import { cleanStatement } from "./statementHtml";
 
 export interface Sample {
   Input: string;
@@ -12,6 +13,8 @@ export interface ParsedProblem {
   title: string;
   samples: Sample[];
   statement: string;
+  /** Safe HTML with $…$ math, or "" when the page had no statement. */
+  statementHtml: string;
 }
 
 /** Turns a <pre> into text: <br> becomes a newline, and surrounding blank lines go. */
@@ -30,23 +33,33 @@ function statementText($: cheerio.CheerioAPI, root: cheerio.Cheerio<any>): strin
     const tex = s.text();
     s.replaceWith(display ? `\n$$${tex}$$\n` : `$${tex}$`);
   });
+  // CSES: .math spans hold raw TeX (or a rendered tree with a TeX annotation).
   clone.find(".math").each((_, el) => {
-    const ann = $(el).find("annotation").first().text();
-    if (ann) {
+    const tex = ($(el).find("annotation").first().text() || $(el).text()).trim();
+    if (tex) {
       const display = $(el).hasClass("math-display");
-      $(el).replaceWith(display ? `\n$$${ann}$$\n` : `$${ann}$`);
+      $(el).replaceWith(display ? `\n$$${tex}$$\n` : `$${tex}$`);
     }
+  });
+  // AtCoder: variables and formulas are <var> elements.
+  clone.find("var").each((_, el) => {
+    $(el).replaceWith(`$${$(el).text().trim()}$`);
   });
   clone.find("style, script, .MathJax, .MathJax_Preview, mjx-container").remove();
   clone.find("br").replaceWith("\n");
   clone.find("p, div, li, h1, h2, h3, h4, ul, ol, pre, tr, section").each((_, el) => {
     $(el).prepend("\n").append("\n");
   });
-  const lines = clone.text().replace(/\r/g, "").split("\n").map((l) => l.replace(/[ \t]+/g, " ").trim());
+  // Codeforces writes math as $$$…$$$ inline and $$$$$$…$$$$$$ display.
+  const text = clone
+    .text()
+    .replace(/\${6}([\s\S]+?)\${6}/g, "\n$$$$$1$$$$\n")
+    .replace(/\${3}([\s\S]+?)\${3}/g, "$$$1$$");
+  const lines = text.replace(/\r/g, "").split("\n").map((l) => l.replace(/[ \t]+/g, " ").trim());
   return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
-export function parseCodeforces(html: string): ParsedProblem {
+export function parseCodeforces(html: string, url = "https://codeforces.com/"): ParsedProblem {
   const $ = cheerio.load(html);
   const title = $(".title").first().text().replace(/^[A-Z]\d?\.\s*/, "").trim();
 
@@ -60,11 +73,12 @@ export function parseCodeforces(html: string): ParsedProblem {
   });
 
   const root = $(".problem-statement").first();
-  const statement = root.length ? (root.find(".sample-tests").remove(), statementText($, root)) : "";
-  return { title, samples, statement };
+  root.find(".sample-tests").remove();
+  const statement = root.length ? statementText($, root) : "";
+  return { title, samples, statement, statementHtml: root.length ? cleanStatement($, root, url) : "" };
 }
 
-export function parseCSES(html: string): ParsedProblem {
+export function parseCSES(html: string, url = "https://cses.fi/"): ParsedProblem {
   const $ = cheerio.load(html);
   const title = $("h1").first().text().trim();
 
@@ -76,16 +90,18 @@ export function parseCSES(html: string): ParsedProblem {
 
   const content = $(".content").first();
   let statement = "";
+  let statementHtml = "";
   if (content.length) {
     const ex = content.find("#example");
     ex.nextAll().remove();
     ex.remove();
     statement = statementText($, content);
+    statementHtml = cleanStatement($, content, url);
   }
-  return { title, samples, statement };
+  return { title, samples, statement, statementHtml };
 }
 
-export function parseAtCoder(html: string): ParsedProblem {
+export function parseAtCoder(html: string, url = "https://atcoder.jp/"): ParsedProblem {
   const $ = cheerio.load(html);
   const title = $("title").first().text().split(" - ").slice(1).join(" - ").trim() || $("title").text().trim();
 
@@ -110,6 +126,14 @@ export function parseAtCoder(html: string): ParsedProblem {
 
   const root = $("#task-statement").first();
   const en = root.find(".lang-en");
-  const statement = root.length ? statementText($, en.length ? en : root) : "";
-  return { title, samples, statement };
+  const part = en.length ? en.first() : root;
+  const statement = root.length ? statementText($, part) : "";
+  // Samples are shown in the Tests tab, so their sections leave the statement.
+  part.find("h3").each((_, h) => {
+    if (!/^(Sample|入力例|出力例)/.test($(h).text().trim())) return;
+    const part = $(h).closest(".part");
+    // Older pages have no .part wrapper: the heading's parent is the section box.
+    (part.length ? part : $(h).parent()).not(root).remove();
+  });
+  return { title, samples, statement, statementHtml: root.length ? cleanStatement($, part, url) : "" };
 }

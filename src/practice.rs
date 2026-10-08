@@ -53,6 +53,17 @@ pub struct Input {
     pub attempted: HashMap<String, i64>,
     pub rating: i64,
     pub now: i64,
+    /// The rating auto mode aims at; 0 means default_target(rating).
+    pub target: i64,
+}
+
+/// A little above the current rating, or 1200 when unrated.
+pub fn default_target(rating: i64) -> i64 {
+    if rating == 0 {
+        1200
+    } else {
+        rating + 50
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -118,7 +129,7 @@ impl Ctx<'_> {
 
 /// Up to `count` unsolved problems for the mode, best first.
 pub fn recommend(input: &Input, mode: Mode, count: usize) -> Vec<Pick> {
-    let target = if input.rating == 0 { 1200 } else { input.rating + 50 };
+    let target = if input.target > 0 { input.target } else { default_target(input.rating) };
     let ctx = Ctx { input, skill: tag_skill(input), touch: tag_touch(input), target };
 
     let mut picks: Vec<Pick> = input
@@ -341,6 +352,18 @@ mod tests {
     }
 
     #[test]
+    fn explicit_target_overrides_the_default() {
+        let input = Input {
+            problems: vec![cf("1A", 1500, &["dp"]), cf("2A", 900, &["dp"])],
+            rating: 850,
+            target: 1500,
+            ..Default::default()
+        };
+        assert_eq!(recommend(&input, Mode::Auto, 1)[0].problem.id, "1A");
+        assert_eq!(default_target(0), 1200);
+    }
+
+    #[test]
     fn auto_prefers_target_rating() {
         let input = Input {
             problems: vec![cf("3A", 1000, &["greedy"]), cf("3B", 1300, &["greedy"])],
@@ -370,6 +393,7 @@ mod tests {
             attempted: [("codeforces1A".to_string(), now - 100 * 24 * 3600), ("codeforces1B".to_string(), now - 3 * 24 * 3600)].into_iter().collect(),
             rating: 1000,
             now,
+            ..Default::default()
         };
         assert_eq!(ids(&recommend(&input, Mode::Refresh, 10)), vec!["2A"]);
     }

@@ -10,3 +10,18 @@ extensions/vscode/out/
 codeforces/
 cses/
 atcoder/
+
+# Local design-lint tool state
+.impeccable/
+
+# Solutions saved at the repo root by the VS Code extension
+/*.cpp
+/*.c
+/*.py
+/*.java
+/*.kt
+/*.rs
+/*.go
+/*.js
+/*.rb
+/*.hs

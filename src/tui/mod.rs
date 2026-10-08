@@ -2,14 +2,14 @@
 // the seven recommendation modes, Contests/Analytics/Dashboard/Config report
 // tabs, and keys to open, run, submit, and view a problem's statement.
 //
-// Unlike the Go version's Bubble Tea (Elm-architecture, async-command) model,
-// actions here just block the event loop for the moment they take: there is
-// no job worth backgrounding a thread for, so this skips that machinery.
-// Note: add async commands back only if a real fetch is slow enough to
-// make the UI feel stuck.
+// Slow actions (open, run, statement, refresh) run on a background thread and
+// report back over a channel; the loop wakes every 100ms to collect results
+// and spin the busy indicator, so the interface never freezes. One job runs
+// at a time.
 
 mod config_view;
 mod contests_view;
+mod query;
 mod statement_view;
 mod stats_view;
 mod system;
@@ -30,8 +30,19 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 use std::time::Duration as StdDuration;
+
+/// What a background job sends back.
+enum Msg {
+    Status(String),
+    Opened(Result<(PathBuf, usize)>),
+    Ran(String, Result<Vec<CaseResult>>),
+    Statement(String, Vec<crate::judge::statement::Block>, Vec<crate::problem::Sample>, Option<String>),
+    Synced(Result<Deps>),
+}
 use theme::Theme;
 
 /// Everything the UI needs from the rest of CPX.
@@ -78,7 +89,11 @@ pub struct Model {
     tab: Tab,
     visible: Vec<usize>,
     picks: Vec<practice::Pick>,
+    /// The Dashboard's "Up next": top auto picks, refreshed with the data.
+    up_next: Vec<practice::Pick>,
     mode: usize,
+    /// Practice target rating set with [ and ]; 0 follows the current rating.
+    target: i64,
     cursor: usize,
 
     filtering: bool,
@@ -103,6 +118,9 @@ pub struct Model {
     height: u16,
     theme: Theme,
     quit: bool,
+
+    job: Option<Receiver<Msg>>,
+    spin: usize,
 }
 
 /// Starts the interface and blocks until the user quits.
@@ -129,11 +147,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, model: &
         model.height = size.height;
         terminal.draw(|f| view::draw(f, model))?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press {
-                model.handle_key(key, terminal)?;
+        if event::poll(StdDuration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    model.handle_key(key);
+                }
             }
         }
+        model.poll_job();
         if model.quit {
             break;
         }
@@ -164,8 +185,6 @@ fn key_token(key: KeyEvent) -> String {
     }
 }
 
-type Term = Terminal<CrosstermBackend<std::io::Stdout>>;
-
 impl Model {
     fn new(deps: Deps) -> Self {
         let theme = theme::apply(&deps.config.theme);
@@ -179,7 +198,9 @@ impl Model {
             tab: Tab::Problems,
             visible: Vec::new(),
             picks: Vec::new(),
+            up_next: Vec::new(),
             mode: 0,
+            target: 0,
             cursor: 0,
             filtering: false,
             filter: String::new(),
@@ -198,21 +219,104 @@ impl Model {
             height: 0,
             theme,
             quit: false,
+            job: None,
+            spin: 0,
         };
         m.apply_filter();
+        m.up_next = practice::recommend(&m.practice_input(), practice::Mode::Auto, 5);
         m
     }
 
-    fn handle_key(&mut self, key: KeyEvent, terminal: &mut Term) -> Result<()> {
+    fn handle_key(&mut self, key: KeyEvent) {
         if self.cfg_editing {
             self.update_config_edit(key);
-            return Ok(());
-        }
-        if self.filtering {
+        } else if self.filtering {
             self.update_filter(key);
-            return Ok(());
+        } else {
+            self.update_normal(key);
         }
-        self.update_normal(key, terminal)
+    }
+
+    /// Starts f on a background thread, unless a job is already running.
+    fn spawn(&mut self, status: String, f: impl FnOnce(&Sender<Msg>) + Send + 'static) {
+        if self.job.is_some() {
+            self.status = "Busy: wait for the current job to finish".to_string();
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || f(&tx));
+        self.job = Some(rx);
+        self.status = status;
+    }
+
+    /// Applies whatever the running job has sent so far.
+    fn poll_job(&mut self) {
+        let Some(rx) = &self.job else { return };
+        self.spin = self.spin.wrapping_add(1);
+        let mut done = false;
+        let mut msgs = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(m) => msgs.push(m),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    done = true;
+                    break;
+                }
+            }
+        }
+        for m in msgs {
+            self.apply(m);
+        }
+        if done {
+            self.job = None;
+        }
+    }
+
+    fn apply(&mut self, m: Msg) {
+        match m {
+            Msg::Status(s) => self.status = s,
+            Msg::Opened(Ok((path, samples))) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.status = format!("Opened {name} · {samples} sample(s)");
+            }
+            Msg::Opened(Err(e)) => self.status = format!("Open: {e}"),
+            Msg::Ran(id, Ok(results)) => {
+                let passed = results.iter().filter(|r| r.passed).count();
+                self.status = format!("Tests: {passed}/{} passed", results.len());
+                self.ran_id = id;
+                self.results = results;
+            }
+            Msg::Ran(_, Err(e)) => {
+                self.results.clear();
+                self.status = format!("Test: {e}");
+            }
+            Msg::Statement(key, blocks, samples, err) => {
+                if key != self.stmt_key {
+                    return; // the user moved on while it loaded
+                }
+                if let Some(e) = err {
+                    self.status = format!("Statement: {e}");
+                } else {
+                    self.stmt_blocks = blocks;
+                    self.stmt_samples = samples;
+                    self.stmt_scroll = 0;
+                    self.stmt_open = true;
+                    self.status = "Statement open · j/k scroll · v closes".to_string();
+                }
+            }
+            Msg::Synced(Ok(deps)) => {
+                let n = deps.problems.len();
+                self.deps = deps;
+                self.apply_filter();
+                self.up_next = practice::recommend(&self.practice_input(), practice::Mode::Auto, 5);
+                if self.tab == Tab::Practice {
+                    self.recompute_picks();
+                }
+                self.status = format!("Refreshed · {n} problems");
+            }
+            Msg::Synced(Err(e)) => self.status = format!("Refresh failed: {e}"),
+        }
     }
 
     fn update_filter(&mut self, key: KeyEvent) {
@@ -274,6 +378,13 @@ impl Model {
             "u" | "pgup" => self.stmt_scroll = text::clamp(self.stmt_scroll - 10, 0, 1 << 20),
             "g" => self.stmt_scroll = 0,
             "G" => self.stmt_scroll = 1 << 20,
+            "b" => {
+                if let Some(p) = self.statement_problem() {
+                    if let Err(e) = system::open_url(&p.url) {
+                        self.status = format!("Browser: {e}");
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -288,20 +399,20 @@ impl Model {
         self.recompute_picks();
     }
 
-    fn update_normal(&mut self, key: KeyEvent, terminal: &mut Term) -> Result<()> {
+    fn update_normal(&mut self, key: KeyEvent) {
         if self.stmt_open {
             self.update_statement(key);
-            return Ok(());
+            return;
         }
         let token = key_token(key);
         match token.as_str() {
             "d" => {
                 self.detail_scroll += 5;
-                return Ok(());
+                return;
             }
             "u" => {
                 self.detail_scroll = (self.detail_scroll - 5).max(0);
-                return Ok(());
+                return;
             }
             _ => {}
         }
@@ -309,7 +420,7 @@ impl Model {
 
         if self.tab == Tab::Config && token == "enter" {
             self.activate_config();
-            return Ok(());
+            return;
         }
         if self.tab == Tab::Contests && matches!(token.as_str(), "enter" | "o" | "b") {
             if let Some(k) = self.selected_contest() {
@@ -318,7 +429,7 @@ impl Model {
                     Err(e) => self.status = format!("Browser: {e}"),
                 }
             }
-            return Ok(());
+            return;
         }
 
         match token.as_str() {
@@ -347,10 +458,25 @@ impl Model {
                     self.filtering = true;
                 }
             }
-            "o" | "enter" => self.do_open(terminal)?,
-            "t" => self.do_run(terminal)?,
-            "v" => self.do_statement(terminal)?,
-            "s" => self.do_submit(terminal)?,
+            "p" if self.tab == Tab::Problems => {
+                self.filter = query::cycle_platform(&self.filter);
+                self.apply_filter();
+            }
+            "[" | "]" if self.tab == Tab::Practice => {
+                let rating = self.deps.rating_changes.last().map(|r| r.new_rating).unwrap_or(0);
+                let current = if self.target > 0 { self.target } else { practice::default_target(rating) };
+                self.target = (current + if token == "]" { 100 } else { -100 }).clamp(800, 3500);
+                self.recompute_picks();
+            }
+            "c" if self.tab == Tab::Problems => {
+                self.filter.clear();
+                self.apply_filter();
+            }
+            "o" | "enter" => self.do_open(),
+            "t" => self.do_run(),
+            "v" => self.do_statement(),
+            "s" => self.do_submit(),
+            "r" => self.do_refresh(),
             "b" => {
                 if let Some(p) = self.selected() {
                     if let Err(e) = system::open_url(&p.url) {
@@ -360,77 +486,60 @@ impl Model {
             }
             _ => {}
         }
-        Ok(())
     }
 
-    fn show_busy(&mut self, terminal: &mut Term, status: impl Into<String>) -> Result<()> {
-        self.status = status.into();
-        terminal.draw(|f| view::draw(f, self))?;
-        Ok(())
+    fn do_open(&mut self) {
+        let Some(p) = self.selected() else { return };
+        let (cfg, root) = (self.deps.config.clone(), self.deps.root.clone());
+        self.spawn(format!("Opening {}…", p.id), move |tx| {
+            let _ = tx.send(Msg::Opened(open_solution(&cfg, &root, &p)));
+        });
     }
 
-    fn do_open(&mut self, terminal: &mut Term) -> Result<()> {
-        let Some(p) = self.selected() else { return Ok(()) };
-        self.show_busy(terminal, format!("Opening {}…", p.id))?;
-        match open_solution(&self.deps, &p) {
-            Ok((path, samples)) => {
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                self.status = format!("Opened {name} · {samples} sample(s)");
-            }
-            Err(e) => self.status = format!("Open: {e}"),
-        }
-        Ok(())
+    fn do_run(&mut self) {
+        let Some(p) = self.selected() else { return };
+        let (cfg, root, dir) = (self.deps.config.clone(), self.deps.root.clone(), self.deps.config_dir.clone());
+        self.spawn(format!("Running {}…", p.id), move |tx| {
+            let _ = tx.send(Msg::Ran(p.id.clone(), run_solution(&cfg, &root, &dir, &p)));
+        });
     }
 
-    fn do_run(&mut self, terminal: &mut Term) -> Result<()> {
-        let Some(p) = self.selected() else { return Ok(()) };
-        self.show_busy(terminal, format!("Running {}…", p.id))?;
-        match run_solution(&self.deps, &p) {
-            Ok(results) => {
-                let passed = results.iter().filter(|r| r.passed).count();
-                self.status = format!("Tests: {passed}/{} passed", results.len());
-                self.ran_id = p.id.clone();
-                self.results = results;
-            }
-            Err(e) => {
-                self.results.clear();
-                self.status = format!("Test: {e}");
-            }
-        }
-        Ok(())
-    }
-
-    fn do_submit(&mut self, terminal: &mut Term) -> Result<()> {
-        let Some(p) = self.selected() else { return Ok(()) };
-        self.show_busy(terminal, format!("Submitting {}…", p.id))?;
-        match submit_solution(&self.deps, &p) {
+    fn do_submit(&mut self) {
+        let Some(p) = self.selected() else { return };
+        match submit_solution(&self.deps.config, &self.deps.root, &p) {
             Ok(url) => self.status = format!("Code copied. Paste on the judge page: {url}"),
             Err(e) => self.status = format!("Submit: {e}"),
         }
-        Ok(())
     }
 
-    fn do_statement(&mut self, terminal: &mut Term) -> Result<()> {
-        let Some(p) = self.selected() else { return Ok(()) };
+    fn do_statement(&mut self) {
+        let Some(p) = self.selected() else { return };
         let key = format!("{}{}", p.platform, p.id);
         if self.stmt_open && self.stmt_key == key {
             self.stmt_open = false;
-            return Ok(());
+            return;
         }
-        self.stmt_key = key;
-        self.show_busy(terminal, format!("Loading statement for {}…", p.id))?;
-        let (blocks, samples, err) = statement_view::load(&self.deps.config_dir, &self.deps.root, &self.deps.config, &p);
-        if let Some(e) = err {
-            self.stmt_open = false;
-            self.status = format!("Statement: {e}");
-        } else {
-            self.stmt_blocks = blocks;
-            self.stmt_samples = samples;
-            self.stmt_scroll = 0;
-            self.stmt_open = true;
-            self.status = "Statement open · j/k scroll · v closes".to_string();
-        }
-        Ok(())
+        self.stmt_key = key.clone();
+        let (cfg, root, dir) = (self.deps.config.clone(), self.deps.root.clone(), self.deps.config_dir.clone());
+        self.spawn(format!("Loading statement for {}…", p.id), move |tx| {
+            let (blocks, samples, err) = statement_view::load(&dir, &root, &cfg, &p);
+            let _ = tx.send(Msg::Statement(key, blocks, samples, err));
+        });
+    }
+
+    /// Re-syncs from the judges into the cache, then reloads everything from it.
+    fn do_refresh(&mut self) {
+        let (cfg, dir, path) = (self.deps.config.clone(), self.deps.config_dir.clone(), self.deps.config_path.clone());
+        self.spawn("Refreshing from the judges…".to_string(), move |tx| {
+            let result = (|| {
+                let mut cache = Cache::open(&dir.join("cache.db"))?;
+                crate::sync::run(&mut cache, &cfg, &mut |line| {
+                    let _ = tx.send(Msg::Status(format!("Refreshing: {line}")));
+                })?;
+                load_deps(&cache, cfg, dir, path)
+            })();
+            let _ = tx.send(Msg::Synced(result));
+        });
     }
 
     fn switch_tab(&mut self) {
@@ -486,15 +595,16 @@ impl Model {
         if let Some(r) = self.deps.rating_changes.last() {
             input.rating = r.new_rating;
         }
+        input.target = self.target;
         input
     }
 
     fn apply_filter(&mut self) {
         let keep = if self.tab == Tab::Problems { self.selected().map(|p| format!("{}{}", p.platform, p.id)) } else { None };
-        let q = self.filter.trim().to_lowercase();
+        let q = query::parse(&self.filter);
         self.visible.clear();
         for (i, p) in self.deps.problems.iter().enumerate() {
-            if q.is_empty() || matches_query(p, &q) {
+            if q.matches(p) {
                 self.visible.push(i);
             }
         }
@@ -593,13 +703,6 @@ impl Model {
     }
 }
 
-fn matches_query(p: &Problem, q: &str) -> bool {
-    if p.id.to_lowercase().contains(q) || p.name.to_lowercase().contains(q) {
-        return true;
-    }
-    p.tags.iter().any(|t| t.to_lowercase().contains(q))
-}
-
 /// The configured language's compile settings, or an error naming the problem.
 fn language(cfg: &Config) -> Result<&crate::config::CompileCommand> {
     cfg.compile_commands
@@ -609,10 +712,10 @@ fn language(cfg: &Config) -> Result<&crate::config::CompileCommand> {
 
 /// Creates the solution from a template if missing, saves samples, and opens
 /// the file in the editor. An existing solution is never overwritten.
-fn open_solution(deps: &Deps, p: &Problem) -> Result<(PathBuf, usize)> {
-    let cc = language(&deps.config)?;
-    let path = workspace::solution_path(&deps.root, p, &cc.extension);
-    let tpl = workspace::template(&deps.config.default_language);
+fn open_solution(cfg: &Config, root: &Path, p: &Problem) -> Result<(PathBuf, usize)> {
+    let cc = language(cfg)?;
+    let path = workspace::solution_path(root, p, &cc.extension);
+    let tpl = workspace::template(&cfg.default_language);
     workspace::scaffold(&path, tpl)?;
 
     let mut samples = workspace::load_samples(&path)?;
@@ -620,19 +723,19 @@ fn open_solution(deps: &Deps, p: &Problem) -> Result<(PathBuf, usize)> {
         samples = dispatch::fetch_samples(p).map_err(|e| anyhow::anyhow!("fetch samples: {e}"))?;
         workspace::save_samples(&path, &samples)?;
     }
-    system::open_in_editor(&deps.config.editor, &path.to_string_lossy()).map_err(|e| anyhow::anyhow!("editor: {e}"))?;
+    system::open_in_editor(&cfg.editor, &path.to_string_lossy()).map_err(|e| anyhow::anyhow!("editor: {e}"))?;
     Ok((path, samples.len()))
 }
 
 /// Compiles the solution and runs it against the saved samples.
-fn run_solution(deps: &Deps, p: &Problem) -> Result<Vec<CaseResult>> {
-    let cc = language(&deps.config)?;
-    let path = workspace::solution_path(&deps.root, p, &cc.extension);
+fn run_solution(cfg: &Config, root: &Path, config_dir: &Path, p: &Problem) -> Result<Vec<CaseResult>> {
+    let cc = language(cfg)?;
+    let path = workspace::solution_path(root, p, &cc.extension);
     let samples = workspace::load_samples(&path)?;
     if samples.is_empty() {
         return Err(anyhow::anyhow!("no samples yet: press o first"));
     }
-    let build_dir = deps.config_dir.join("build");
+    let build_dir = config_dir.join("build");
     std::fs::create_dir_all(&build_dir)?;
     let spec = runner::Spec { compile: &cc.compile, run: &cc.run, source: &path, dir: &build_dir };
     runner::run_samples(&spec, &samples, StdDuration::from_secs(5))
@@ -640,10 +743,10 @@ fn run_solution(deps: &Deps, p: &Problem) -> Result<Vec<CaseResult>> {
 
 /// Copies the solution to the clipboard and opens the judge's submit page.
 /// CPX does not post to the judge itself.
-fn submit_solution(deps: &Deps, p: &Problem) -> Result<String> {
-    let cc = language(&deps.config)?;
+fn submit_solution(cfg: &Config, root: &Path, p: &Problem) -> Result<String> {
+    let cc = language(cfg)?;
     let url = dispatch::submit_url(p).ok_or_else(|| anyhow::anyhow!("no submit page known for this problem"))?;
-    let path = workspace::solution_path(&deps.root, p, &cc.extension);
+    let path = workspace::solution_path(root, p, &cc.extension);
     let code = std::fs::read_to_string(&path).map_err(|_| anyhow::anyhow!("no solution file yet: press o first"))?;
     system::copy_clipboard(&code).map_err(|e| anyhow::anyhow!("clipboard: {e}"))?;
     system::open_url(&url).map_err(|e| anyhow::anyhow!("browser: {e}"))?;
@@ -726,6 +829,26 @@ mod tests {
         let s = screen(&mut m, 120, 35);
         assert!(s.contains("Problem number 1"), "{s}");
         assert!(s.contains("Problems"), "{s}");
+    }
+
+    // A job's messages reach the model, and the job clears when its thread ends.
+    #[test]
+    fn background_job_reports_back() {
+        let mut m = Model::new(sample_deps());
+        m.spawn("working".into(), |tx| {
+            tx.send(Msg::Status("halfway".into())).unwrap();
+            tx.send(Msg::Ran("1901A".into(), Ok(Vec::new()))).unwrap();
+        });
+        m.spawn("second".into(), |_| {});
+        assert!(m.status.starts_with("Busy"), "one job at a time: {}", m.status);
+        let started = std::time::Instant::now();
+        while m.job.is_some() && started.elapsed() < StdDuration::from_secs(5) {
+            m.poll_job();
+            thread::sleep(StdDuration::from_millis(5));
+        }
+        assert!(m.job.is_none());
+        assert_eq!(m.ran_id, "1901A");
+        assert_eq!(m.status, "Tests: 0/0 passed");
     }
 
     // Eyeball check against the real cache: cargo test dump_real -- --ignored --nocapture

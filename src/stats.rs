@@ -112,6 +112,48 @@ pub fn sparkline(values: &[i64]) -> String {
         .collect()
 }
 
+/// A block chart `height` rows tall of the last `width` values, top row
+/// first. Each column fills up to its value in eighths of a row; the lowest
+/// value still shows a sliver so every contest is visible.
+pub fn chart(values: &[i64], height: usize, width: usize) -> Vec<String> {
+    const PARTS: [char; 8] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇'];
+    let values = &values[values.len().saturating_sub(width)..];
+    let (Some(&lo), Some(&hi)) = (values.iter().min(), values.iter().max()) else {
+        return Vec::new();
+    };
+    let total = (height * 8) as i64;
+    let filled: Vec<i64> = values.iter().map(|&v| if hi > lo { 1 + (v - lo) * (total - 1) / (hi - lo) } else { total / 2 }).collect();
+    (0..height)
+        .map(|row| {
+            let floor = ((height - 1 - row) * 8) as i64;
+            filled
+                .iter()
+                .map(|&f| match f - floor {
+                    n if n >= 8 => '█',
+                    n if n <= 0 => ' ',
+                    n => PARTS[n as usize],
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// The Codeforces rank title for a rating.
+pub fn rank(rating: i64) -> &'static str {
+    match rating {
+        r if r >= 3000 => "Legendary Grandmaster",
+        r if r >= 2600 => "International Grandmaster",
+        r if r >= 2400 => "Grandmaster",
+        r if r >= 2300 => "International Master",
+        r if r >= 2100 => "Master",
+        r if r >= 1900 => "Candidate Master",
+        r if r >= 1600 => "Expert",
+        r if r >= 1400 => "Specialist",
+        r if r >= 1200 => "Pupil",
+        _ => "Newbie",
+    }
+}
+
 /// Shade level 0..=4 for a daily count. Zero stays empty.
 pub fn heat_level(count: usize) -> usize {
     match count {
@@ -126,6 +168,24 @@ pub fn heat_level(count: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chart_scales_columns_to_the_range() {
+        let c = chart(&[100, 200, 300], 2, 10);
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0], "  █"); // only the highest reaches the top row
+        assert_eq!(c[1].chars().next(), Some('▁')); // the lowest keeps a sliver
+        assert_eq!(c[1].chars().nth(2), Some('█'));
+        assert_eq!(chart(&[1, 2, 3, 4, 5], 1, 2)[0].chars().count(), 2, "keeps the last width values");
+        assert!(chart(&[], 3, 10).is_empty());
+    }
+
+    #[test]
+    fn rank_titles() {
+        assert_eq!(rank(393), "Newbie");
+        assert_eq!(rank(1200), "Pupil");
+        assert_eq!(rank(2399), "International Master");
+    }
     use chrono::TimeZone;
 
     fn sub(verdict: &str, at: i64, problem: &str) -> Submission {

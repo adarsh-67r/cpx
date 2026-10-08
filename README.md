@@ -79,8 +79,12 @@ cpx            # go
 | `cpx sync` | Refresh problems, contests, submissions, and ratings |
 | `cpx setup` | Run the setup questions again |
 
-**Keys:** `j/k` move · `tab` switch tab · `/` filter · `m` practice mode · `o` open · `t` test ·
-`s` submit · `v` statement · `d/u` scroll · `b` browser · `q` quit
+**Keys:** `j/k` move · `tab` switch tab · `/` filter · `p` judge · `c` clear filter · `m` practice mode ·
+`[` `]` practice target · `o` open · `t` test · `s` submit · `v` statement · `d/u` scroll · `b` browser ·
+`r` refresh · `q` quit
+
+**Filter** (`/`) takes any mix of terms: `@cf` / `@cses` / `@atcoder`, a rating range like `1200-1600`,
+`1600+` or `-1400`, tags like `#dp` (`#dp,greedy` for either), and plain words.
 
 Settings live in `config.json` in your OS config folder (`%APPDATA%\cpx` on Windows,
 `~/.config/cpx` on Linux, `~/Library/Application Support/cpx` on macOS) and can be edited
@@ -96,10 +100,16 @@ from the Config tab. Compile and run commands are templates, so any language wor
 
 A standalone extension in [`extensions/vscode`](extensions/vscode). It doesn't need the terminal app.
 
-- **CPX: Open Problem from URL**: paste a Codeforces, CSES, or AtCoder link to get a solution file with its samples
-- **CPX: Run Samples for Active File**: a results panel with per-sample verdicts
-- **CPX: Show Statement**: the problem beside your code
-- **CPX: Copy Code and Open Submit Page**
+A **CPX** panel in the activity bar shows the problem behind the open solution file:
+
+- **Tests**: a verdict strip (AC / WA / TLE / RE / CE), editable tests you can add to, and a run button per test, with the first wrong output line highlighted
+- **Statement**: the problem statement with typeset math
+- **Run all**, **Submit** (copies your code and opens the judge's submit page), and **Find editorial**
+
+Paste a Codeforces, CSES, or AtCoder link with **CPX: Open Problem from URL** to get a solution file.
+Only the solution goes in your folder (`4A.cpp`, `WeirdAlgorithm.cpp`); tests and statements are kept by
+the extension. Languages: C++, C, Python, PyPy, Java, Kotlin, Rust, Go, JavaScript, Ruby, Haskell, with
+your own templates (`cpx.templates`) and build commands (`cpx.commands`).
 
 **Install:** download `cpx-vscode-*.vsix` from the [latest release](https://github.com/adarsh-67r/cpx/releases),
 then in VS Code open Extensions → `⋯` → **Install from VSIX…**

@@ -15,6 +15,8 @@ pub const PARAGRAPH: &str = "paragraph";
 pub const MATH: &str = "math";
 pub const ITEM: &str = "item";
 pub const CODE: &str = "code";
+/// A picture; the text is its URL.
+pub const IMAGE: &str = "image";
 
 /// One piece of a statement. The JSON keys match the Go version's cache files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,12 +54,6 @@ pub fn parse_cses(page: &str) -> Vec<Block> {
     };
     let mut b = Builder::default();
     for child in content.children() {
-        // Everything from the Example heading on is covered by the samples.
-        if let Some(el) = ElementRef::wrap(child) {
-            if el.value().attr("id") == Some("example") {
-                break;
-            }
-        }
         walk(child, &mut b);
     }
     b.flush(PARAGRAPH);
@@ -97,6 +93,8 @@ fn walk_root(root: ElementRef<'_>) -> Vec<Block> {
 struct Builder {
     blocks: Vec<Block>,
     cur: String,
+    /// Set at CSES's Example heading: everything after it is the samples.
+    stopped: bool,
 }
 
 impl Builder {
@@ -116,6 +114,9 @@ const BLOCK_TAGS: &[&str] = &[
 const PROPERTY_CLASSES: &[&str] = &["time-limit", "memory-limit", "input-file", "output-file"];
 
 fn walk(node: ego_tree::NodeRef<'_, scraper::Node>, b: &mut Builder) {
+    if b.stopped {
+        return;
+    }
     match node.value() {
         scraper::Node::Text(t) => b.cur.push_str(t),
         scraper::Node::Element(_) => {
@@ -141,6 +142,15 @@ fn element(el: ElementRef<'_>, b: &mut Builder) {
     if matches!(name, "style" | "head" | "noscript") {
         return;
     }
+    if el.value().attr("id") == Some("example") {
+        b.flush(PARAGRAPH);
+        b.stopped = true;
+        return;
+    }
+    // AtCoder sample sections: the viewer shows the saved samples instead.
+    if (name == "section" || classes.contains(&"part")) && is_sample_section(el) {
+        return;
+    }
     if classes.iter().any(|c| c.contains("MathJax") || c.contains("mjx") || *c == "sr-only" || *c == "sample-tests") {
         return;
     }
@@ -155,15 +165,23 @@ fn element(el: ElementRef<'_>, b: &mut Builder) {
     }
 
     // CSES wraps math in a KaTeX span whose annotation holds the TeX source.
+    // Without an annotation the span holds the raw TeX itself.
     if classes.iter().any(|c| c.contains("math")) {
-        if let Some(tex) = annotation_of(el) {
-            emit_math(b, &tex, classes.contains(&"math-display"));
-            return;
-        }
+        let tex = annotation_of(el).unwrap_or_else(|| el.text().collect::<String>().trim().to_string());
+        emit_math(b, &tex, classes.contains(&"math-display"));
+        return;
     }
 
     match name {
         "br" => b.cur.push(' '),
+        "img" => {
+            let src = el.value().attr("src").unwrap_or("").trim();
+            let url = if let Some(rest) = src.strip_prefix("//") { format!("https://{rest}") } else { src.to_string() };
+            if url.starts_with("http") {
+                b.flush(PARAGRAPH);
+                b.blocks.push(Block { kind: IMAGE.into(), text: url, ordered: false });
+            }
+        }
         "pre" => {
             b.flush(PARAGRAPH);
             let code = pre_text(el);
@@ -232,6 +250,15 @@ fn emit_property(el: ElementRef<'_>, b: &mut Builder) {
     if !prop.is_empty() && !value.is_empty() {
         b.blocks.push(Block { kind: META.into(), text: format!("{prop}: {value}"), ordered: false });
     }
+}
+
+/// A section whose first heading is "Sample Input 1" and the like.
+fn is_sample_section(el: ElementRef<'_>) -> bool {
+    el.select(&sel("h3")).next().is_some_and(|h| {
+        let t = h.text().collect::<String>();
+        let t = t.trim();
+        t.starts_with("Sample") || t.starts_with("入力例") || t.starts_with("出力例")
+    })
 }
 
 fn annotation_of(el: ElementRef<'_>) -> Option<String> {
@@ -322,6 +349,22 @@ mod tests {
         assert_eq!(bs.len(), 1);
         assert_eq!(bs[0].kind, CODE);
         assert_eq!(bs[0].text, "a b\nc d");
+    }
+
+    #[test]
+    fn cses_raw_tex_spans_are_math() {
+        let bs = parse_cses(&fixture("cses_1068.html"));
+        assert!(bs.iter().all(|b| !b.text.contains("\\rightarrow") && !b.text.contains("\\le")), "{bs:?}");
+        assert!(bs.iter().any(|b| b.kind == MATH && b.text.contains('→')), "{bs:?}");
+        assert!(bs.iter().all(|b| b.text != "Example" && b.text != "Input:"), "{bs:?}");
+    }
+
+    #[test]
+    fn images_become_image_blocks_and_atcoder_samples_go() {
+        let bs = parse_codeforces(r#"<div class="problem-statement"><p>See <img src="//espresso.codeforces.com/a.png"> it.</p></div>"#);
+        assert_eq!(find(&bs, IMAGE, "espresso").unwrap().text, "https://espresso.codeforces.com/a.png");
+        let at = parse_atcoder(&fixture("atcoder_abc001_1.html"));
+        assert!(at.iter().all(|b| !b.text.starts_with("入力例") && !b.text.starts_with("Sample Input")), "{at:?}");
     }
 
     #[test]

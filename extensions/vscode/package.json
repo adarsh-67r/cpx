@@ -22,15 +22,23 @@
       },
       {
         "command": "cpx.runSamples",
-        "title": "CPX: Run Samples for Active File"
+        "title": "CPX: Run Samples for Active File",
+        "icon": "$(play)"
       },
       {
         "command": "cpx.submit",
-        "title": "CPX: Copy Code and Open Submit Page"
+        "title": "CPX: Copy Code and Open Submit Page",
+        "icon": "$(cloud-upload)"
       },
       {
         "command": "cpx.showStatement",
-        "title": "CPX: Show Statement"
+        "title": "CPX: Show Statement",
+        "icon": "$(book)"
+      },
+      {
+        "command": "cpx.findEditorial",
+        "title": "CPX: Find Editorial",
+        "icon": "$(search)"
       }
     ],
     "configuration": {
@@ -40,32 +48,97 @@
           "type": "string",
           "enum": [
             "cpp",
-            "python"
+            "c",
+            "python",
+            "pypy",
+            "java",
+            "kotlin",
+            "rust",
+            "go",
+            "javascript",
+            "ruby",
+            "haskell"
           ],
           "default": "cpp",
-          "description": "Language for new solution files."
+          "description": "Language for new solution files. With pypy, .py files run under PyPy."
         },
         "cpx.workspaceFolder": {
           "type": "string",
           "default": "",
-          "description": "Folder for solutions. Blank means the first VS Code workspace folder, or your home folder if none is open."
-        },
-        "cpx.pythonPath": {
-          "type": "string",
-          "default": "python",
-          "description": "Python executable used to run Python solutions."
+          "description": "Folder for solutions. Blank means the first VS Code workspace folder, or ~/cpx if none is open."
         },
         "cpx.timeLimitMs": {
           "type": "number",
           "default": 5000,
           "description": "Per-sample time limit in milliseconds."
         },
-        "cpx.cppCompiler": {
-          "type": "string",
-          "default": "g++",
-          "description": "C++ compiler used for C++ solutions."
+        "cpx.templates": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "markdownDescription": "Your own starting file per language, as a path. Example: `{ \"cpp\": \"C:/cp/template.cpp\" }`."
+        },
+        "cpx.commands": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "compile": {
+                "type": "string"
+              },
+              "run": {
+                "type": "string"
+              }
+            }
+          },
+          "markdownDescription": "Override how a language builds and runs. Placeholders: `{source}`, `{exe}`, `{out}`, `{dir}`. Example: `{ \"cpp\": { \"compile\": \"g++ -std=c++20 -O2 -o {exe} {source}\" }, \"python\": { \"run\": \"python3 {source}\" } }`. An empty compile skips the build step."
+        },
+        "cpx.subfolderPerPlatform": {
+          "type": "boolean",
+          "default": false,
+          "description": "Put solutions in a folder per judge (codeforces/, cses/, atcoder/) instead of directly in the solutions folder."
         }
       }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cpx",
+          "title": "CPX",
+          "icon": "media/cpx.svg"
+        }
+      ]
+    },
+    "views": {
+      "cpx": [
+        {
+          "id": "cpx.actions",
+          "name": "Problem",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "cpx.runSamples",
+          "when": "resourceExtname == .c || resourceExtname == .cpp || resourceExtname == .go || resourceExtname == .hs || resourceExtname == .java || resourceExtname == .js || resourceExtname == .kt || resourceExtname == .py || resourceExtname == .rb || resourceExtname == .rs",
+          "group": "navigation@1"
+        },
+        {
+          "command": "cpx.showStatement",
+          "when": "resourceExtname == .c || resourceExtname == .cpp || resourceExtname == .go || resourceExtname == .hs || resourceExtname == .java || resourceExtname == .js || resourceExtname == .kt || resourceExtname == .py || resourceExtname == .rb || resourceExtname == .rs",
+          "group": "navigation@2"
+        },
+        {
+          "command": "cpx.submit",
+          "when": "resourceExtname == .c || resourceExtname == .cpp || resourceExtname == .go || resourceExtname == .hs || resourceExtname == .java || resourceExtname == .js || resourceExtname == .kt || resourceExtname == .py || resourceExtname == .rb || resourceExtname == .rs",
+          "group": "navigation@3"
+        }
+      ]
     }
   },
   "scripts": {
@@ -74,7 +147,8 @@
     "package": "npm run build && vsce package"
   },
   "dependencies": {
-    "cheerio": "^1.0.0"
+    "cheerio": "^1.0.0",
+    "katex": "^0.19.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

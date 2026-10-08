@@ -4,20 +4,21 @@
 import { spawn } from "child_process";
 import * as path from "path";
 import { Sample } from "./judge/parse";
-
-export type Language = "cpp" | "python";
+import { Commands } from "./languages";
 
 export interface RunSpec {
-  language: Language;
+  commands: Commands;
   source: string; // absolute path to the solution file
   buildDir: string; // scratch folder for compiled programs
-  cppCompiler: string; // "g++" by default
-  pythonPath: string; // "python" by default
   timeLimitMs: number;
 }
 
+/** CE (compile error) applies to the whole run, so it is not a per-case verdict. */
+export type Verdict = "AC" | "WA" | "TLE" | "RE";
+
 export interface CaseResult {
   index: number;
+  verdict: Verdict;
   passed: boolean;
   input: string;
   expected: string;
@@ -69,18 +70,30 @@ function exec(cmd: string, args: string[], cwd: string, stdin: string | undefine
   });
 }
 
-/** Builds the program for C++; Python needs no build step. Throws on compile failure. */
+/** Fills {source}, {exe}, {out}, and {dir} into a command. */
+export function expand(args: string[], spec: RunSpec): string[] {
+  const out = path.join(spec.buildDir, path.basename(spec.source, path.extname(spec.source)));
+  const exe = out + (process.platform === "win32" ? ".exe" : "");
+  return args.map((a) =>
+    a.replace(/{source}/g, () => spec.source).replace(/{exe}/g, () => exe).replace(/{out}/g, () => out).replace(/{dir}/g, () => spec.buildDir),
+  );
+}
+
+/** Runs the compile step, if the language has one. Throws on failure. */
 async function build(spec: RunSpec): Promise<string[]> {
-  if (spec.language === "python") {
-    return [spec.pythonPath, spec.source];
+  if (spec.commands.compile) {
+    const [cmd, ...args] = expand(spec.commands.compile, spec);
+    let done: Done;
+    try {
+      done = await exec(cmd, args, spec.buildDir, undefined, 120_000);
+    } catch (e) {
+      throw new Error(`Compilation failed:\ncould not start ${cmd}: ${(e as Error).message}`);
+    }
+    if (done.code !== 0) {
+      throw new Error("Compilation failed:\n" + (done.stderr || done.stdout).trim());
+    }
   }
-  const base = path.basename(spec.source, path.extname(spec.source));
-  const exe = path.join(spec.buildDir, base + (process.platform === "win32" ? ".exe" : ""));
-  const done = await exec(spec.cppCompiler, ["-std=c++17", "-O2", "-o", exe, spec.source], spec.buildDir, undefined, 120_000);
-  if (done.code !== 0) {
-    throw new Error("Compilation failed:\n" + (done.stderr || done.stdout).trim());
-  }
-  return [exe];
+  return expand(spec.commands.run, spec);
 }
 
 /** Runs every sample. A compile failure throws; a bad sample is reported in its result. */
@@ -94,20 +107,22 @@ export async function runSamples(spec: RunSpec, samples: Sample[]): Promise<Case
     try {
       done = await exec(cmd, args, spec.buildDir, s.Input, spec.timeLimitMs);
     } catch (e) {
-      results.push({ ...base, passed: false, actual: "", durationMs: 0, error: String(e) });
+      results.push({ ...base, verdict: "RE", passed: false, actual: "", durationMs: 0, error: String(e) });
       continue;
     }
     if (done.timedOut) {
-      results.push({ ...base, passed: false, actual: done.stdout, durationMs: done.durationMs, error: "time limit exceeded" });
+      results.push({ ...base, verdict: "TLE", passed: false, actual: done.stdout, durationMs: done.durationMs, error: "time limit exceeded" });
       continue;
     }
     if (done.code !== 0) {
-      results.push({ ...base, passed: false, actual: done.stdout, durationMs: done.durationMs, error: done.stderr.trim() || `exit code ${done.code}` });
+      results.push({ ...base, verdict: "RE", passed: false, actual: done.stdout, durationMs: done.durationMs, error: done.stderr.trim() || `exit code ${done.code}` });
       continue;
     }
+    const passed = normalize(done.stdout) === normalize(s.Output);
     results.push({
       ...base,
-      passed: normalize(done.stdout) === normalize(s.Output),
+      verdict: passed ? "AC" : "WA",
+      passed,
       actual: done.stdout,
       durationMs: done.durationMs,
     });

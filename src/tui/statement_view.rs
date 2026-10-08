@@ -15,7 +15,8 @@ use std::path::Path;
 pub fn load(config_dir: &Path, root: &Path, cfg: &Config, p: &Problem) -> (Vec<Block>, Vec<Sample>, Option<String>) {
     let dir = config_dir.join("statements");
     let key = format!("{}{}", p.platform, p.id);
-    let path = dir.join(format!("{key}.json"));
+    // v2: the parser now keeps CSES math, images, and drops sample sections.
+    let path = dir.join(format!("{key}.v2.json"));
 
     let ext = cfg.compile_commands.get(&cfg.default_language).map(|c| c.extension.as_str()).filter(|e| !e.is_empty()).unwrap_or(".cpp");
     let solution = workspace::solution_path(root, p, ext);
@@ -111,6 +112,12 @@ pub fn build_page(blocks: &[Block], samples: &[Sample], width: usize, t: &Theme)
                     }
                 }
             }
+            statement::IMAGE => {
+                spacer(&mut out, t.text);
+                out.push(LLine::new("▣ Image (b opens the problem in the browser)", t.sub));
+                out.push(LLine::new(truncate(&b.text, width), t.muted));
+                spacer(&mut out, t.text);
+            }
             statement::CODE => {
                 spacer(&mut out, t.text);
                 for l in b.text.split('\n') {
@@ -166,7 +173,7 @@ pub fn render(blocks: &[Block], samples: &[Sample], scroll: i64, title: &str, w:
     let off = scroll.clamp(0, max_scroll);
     let pct = if max_scroll > 0 { off * 100 / max_scroll } else { 100 };
 
-    let head = format!("{}  j/k scroll · d/u page · v back · {pct}%", truncate(title, width));
+    let head = format!("{}  j/k scroll · d/u page · b browser · v back · {pct}%", truncate(title, width));
     let mut out = vec![LLine::new(head, t.bold)];
     let end = (off + viewport).min(lines.len() as i64) as usize;
     out.extend_from_slice(&lines[off as usize..end]);

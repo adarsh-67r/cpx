@@ -14,7 +14,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Padding, Paragraph};
 use ratatui::Frame;
 
-const KEYS_HINT: &str = "j/k move · tab switch · / filter · m mode · o open · t test · s submit · v statement · d/u scroll · b browser · q quit";
+const KEYS_HINT: &str = "j/k move · tab switch · / filter · p judge · c clear · m mode · o open · t test · s submit · v statement · d/u scroll · b browser · r refresh · q quit";
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn draw(f: &mut Frame, m: &Model) {
     let area = f.area();
@@ -24,7 +25,11 @@ pub fn draw(f: &mut Frame, m: &Model) {
     }
 
     let (header_lines, header_h) = build_header(m);
-    let status_lines = text::wrap(&m.status, m.width as usize);
+    let status = match m.job {
+        Some(_) => format!("{} {}", SPINNER[m.spin % SPINNER.len()], m.status),
+        None => m.status.clone(),
+    };
+    let status_lines = text::wrap(&status, m.width as usize);
     let footer_h = status_lines.len().max(1) as u16;
     let keys_lines = text::wrap(KEYS_HINT, m.width as usize);
     let keys_h = keys_lines.len().max(1) as u16;
@@ -69,7 +74,9 @@ fn build_header(m: &Model) -> (Vec<Line<'static>>, u16) {
         spans.push(Span::raw(" "));
     }
     if m.tab == Tab::Practice {
-        spans.push(Span::styled(format!("  mode: {}", practice::MODES[m.mode].label()), t.muted));
+        let rating = m.deps.rating_changes.last().map(|r| r.new_rating).unwrap_or(0);
+        let target = if m.target > 0 { m.target } else { practice::default_target(rating) };
+        spans.push(Span::styled(format!("  mode: {}  target: {target}  [ ] change", practice::MODES[m.mode].label()), t.muted));
     } else if m.tab == Tab::Problems {
         spans.push(Span::styled(format!("  {}/{}", m.visible.len(), m.deps.problems.len()), t.muted));
     }
@@ -77,7 +84,11 @@ fn build_header(m: &Model) -> (Vec<Line<'static>>, u16) {
     let mut lines = vec![Line::from(spans)];
     let mut h = 1u16;
     if m.tab == Tab::Problems && (m.filtering || !m.filter.is_empty()) {
-        lines.push(Line::from(Span::styled(format!("/ {}", m.filter), t.text)));
+        let mut spans = vec![Span::styled(format!("/ {}", m.filter), t.text)];
+        if m.filtering {
+            spans.push(Span::styled("  @cf @cses @atcoder · 1200-1600 · #dp,greedy · words", t.muted));
+        }
+        lines.push(Line::from(spans));
         h += 1;
     }
     (lines, h)
@@ -97,7 +108,7 @@ fn render_body(f: &mut Frame, area: Rect, m: &Model) {
         let pane_area = Rect { width: w, ..area };
         let text_w = (w as usize).saturating_sub(4);
         let report = match m.tab {
-            Tab::Dashboard => stats_view::render_dashboard(&m.deps.config, &m.deps.submissions, &m.deps.rating_changes, t),
+            Tab::Dashboard => stats_view::render_dashboard(&m.deps.config, &m.deps.problems, &m.deps.submissions, &m.deps.rating_changes, &m.up_next, text_w, t),
             Tab::Contests => contests_view::render(&m.deps.contests, m.cursor, Utc::now().timestamp(), text_w, t),
             Tab::Config => config_view::render(&m.deps.config, m.cursor, m.cfg_editing, &m.cfg_input, text_w, t),
             _ => stats_view::render_analytics(&m.deps.config, &m.deps.problems, &m.deps.submissions, &m.deps.rating_changes, text_w, t),
