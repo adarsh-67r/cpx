@@ -13,21 +13,6 @@ Find a problem, read it, solve it, test it, submit it: one keyboard, zero browse
 
 </div>
 
-```
-CPX  [Problems]  Practice   Contests   Analytics   Dashboard   Config    21498/21498
-╭───────────────────────────────────────────────────╮╭───────────────────────────────────────────────────╮
-│ ▸ 1000A    1200   Codehorses T-shirts             ││ Codehorses T-shirts                               │
-│   1000B    1500   Light It Up                     ││ codeforces · 1000A · rating 1200                  │
-│   1000C    1700   Covered Points Count            ││ https://codeforces.com/problemset/problem/1000/A  │
-│   1000D    1900   Yet Another Problem On a Subse… ││ greedy, implementation                            │
-│   1000E    2100   We Need More Bosses             ││                                                   │
-│   1000F    2400   One Occurrence                  ││ Last run                                          │
-│   1000G    2700   Two-Paths                       ││ ✓ sample 1  4ms                                   │
-│   1001A    1100   Generate plus state or minus s… ││ ✓ sample 2  3ms                                   │
-╰───────────────────────────────────────────────────╯╰───────────────────────────────────────────────────╯
-j/k move · tab switch · / filter · m mode · o open · t test · s submit · v statement · q quit
-```
-
 ## Why CPX?
 
 The usual loop is: browse the problemset in a browser, copy samples by hand, alt-tab to the editor, paste
