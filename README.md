@@ -6,7 +6,7 @@ against the samples, and submit, without leaving the keyboard.
 
 CPX has two parts:
 
-- **`rs/`**: the terminal app (Rust, ratatui).
+- **repo root** (`src/`): the terminal app (Rust, ratatui).
 - **`extensions/vscode/`**: a standalone VS Code extension. It does not need the terminal app.
 
 ## Features
@@ -25,7 +25,6 @@ CPX has two parts:
 Requires [Rust](https://rustup.rs) and a C compiler (SQLite is built from source).
 
 ```sh
-cd rs
 cargo build --release
 ./target/release/cpx          # first run asks a few setup questions
 ```
@@ -55,11 +54,11 @@ from URL**, **Run Samples for Active File**, **Copy Code and Open Submit Page**,
 ## Tests
 
 ```sh
-cd rs && cargo test
+cargo test
 cd extensions/vscode && npm test
 ```
 
-Judge parsers are tested against saved pages in `rs/tests/fixtures/` and
+Judge parsers are tested against saved pages in `tests/fixtures/` and
 `extensions/vscode/test/fixtures/`.
 
 ## License
