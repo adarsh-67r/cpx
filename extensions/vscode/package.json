@@ -1,0 +1,83 @@
+{
+  "name": "cpx-vscode",
+  "displayName": "CPX",
+  "description": "Competitive programming for VS Code: fetch samples, run them locally, and submit from Codeforces, CSES, and AtCoder.",
+  "version": "0.1.0",
+  "license": "MIT",
+  "publisher": "cpx",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Education",
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "cpx.openProblem",
+        "title": "CPX: Open Problem from URL"
+      },
+      {
+        "command": "cpx.runSamples",
+        "title": "CPX: Run Samples for Active File"
+      },
+      {
+        "command": "cpx.submit",
+        "title": "CPX: Copy Code and Open Submit Page"
+      },
+      {
+        "command": "cpx.showStatement",
+        "title": "CPX: Show Statement"
+      }
+    ],
+    "configuration": {
+      "title": "CPX",
+      "properties": {
+        "cpx.defaultLanguage": {
+          "type": "string",
+          "enum": [
+            "cpp",
+            "python"
+          ],
+          "default": "cpp",
+          "description": "Language for new solution files."
+        },
+        "cpx.workspaceFolder": {
+          "type": "string",
+          "default": "",
+          "description": "Folder for solutions. Blank means the first VS Code workspace folder, or your home folder if none is open."
+        },
+        "cpx.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python executable used to run Python solutions."
+        },
+        "cpx.timeLimitMs": {
+          "type": "number",
+          "default": 5000,
+          "description": "Per-sample time limit in milliseconds."
+        },
+        "cpx.cppCompiler": {
+          "type": "string",
+          "default": "g++",
+          "description": "C++ compiler used for C++ solutions."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "npm run build && node --test out/test/cpx.test.js"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.6.0"
+  }
+}

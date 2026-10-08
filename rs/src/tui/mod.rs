@@ -1,0 +1,747 @@
+// The CPX terminal interface: a Problems tab with filter, a Practice tab with
+// the seven recommendation modes, Contests/Analytics/Dashboard/Config report
+// tabs, and keys to open, run, submit, and view a problem's statement.
+//
+// Unlike the Go version's Bubble Tea (Elm-architecture, async-command) model,
+// actions here just block the event loop for the moment they take: there is
+// no job worth backgrounding a thread for, so this skips that machinery.
+// Note: add async commands back only if a real fetch is slow enough to
+// make the UI feel stuck.
+
+mod config_view;
+mod contests_view;
+mod statement_view;
+mod stats_view;
+mod system;
+mod text;
+mod theme;
+mod view;
+
+use crate::cache::Cache;
+use crate::config::{self, Config};
+use crate::judge::dispatch;
+use crate::practice;
+use crate::problem::{Contest, Problem, RatingChange, Submission};
+use crate::runner::{self, CaseResult};
+use crate::workspace;
+use anyhow::Result;
+use chrono::Utc;
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
+use std::path::PathBuf;
+use std::time::Duration as StdDuration;
+use theme::Theme;
+
+/// Everything the UI needs from the rest of CPX.
+pub struct Deps {
+    pub problems: Vec<Problem>,
+    pub submissions: Vec<Submission>,
+    pub rating_changes: Vec<RatingChange>,
+    pub contests: Vec<Contest>,
+    /// CSES task ids the user has solved.
+    pub cses_solved: Vec<String>,
+    pub config: Config,
+    /// Holds config.json, templates/, build/, statements/.
+    pub config_dir: PathBuf,
+    /// config.json itself; empty means changes are not saved.
+    pub config_path: PathBuf,
+    /// Workspace root for solution files.
+    pub root: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Problems,
+    Practice,
+    Contests,
+    Analytics,
+    Dashboard,
+    Config,
+}
+
+const TABS: [Tab; 6] = [Tab::Problems, Tab::Practice, Tab::Contests, Tab::Analytics, Tab::Dashboard, Tab::Config];
+
+impl Tab {
+    fn index(self) -> usize {
+        TABS.iter().position(|t| *t == self).unwrap_or(0)
+    }
+    fn next(self) -> Tab {
+        TABS[(self.index() + 1) % TABS.len()]
+    }
+}
+
+pub struct Model {
+    deps: Deps,
+
+    tab: Tab,
+    visible: Vec<usize>,
+    picks: Vec<practice::Pick>,
+    mode: usize,
+    cursor: usize,
+
+    filtering: bool,
+    filter: String,
+
+    status: String,
+
+    ran_id: String,
+    results: Vec<CaseResult>,
+
+    cfg_editing: bool,
+    cfg_input: String,
+
+    stmt_open: bool,
+    stmt_key: String,
+    stmt_blocks: Vec<crate::judge::statement::Block>,
+    stmt_samples: Vec<crate::problem::Sample>,
+    stmt_scroll: i64,
+    detail_scroll: i64,
+
+    width: u16,
+    height: u16,
+    theme: Theme,
+    quit: bool,
+}
+
+/// Starts the interface and blocks until the user quits.
+pub fn run(deps: Deps) -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    crossterm::execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut model = Model::new(deps);
+    let result = run_loop(&mut terminal, &mut model);
+
+    disable_raw_mode()?;
+    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    result
+}
+
+fn run_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, model: &mut Model) -> Result<()> {
+    loop {
+        let size = terminal.size()?;
+        model.width = size.width;
+        model.height = size.height;
+        terminal.draw(|f| view::draw(f, model))?;
+
+        if let Event::Key(key) = event::read()? {
+            if key.kind == KeyEventKind::Press {
+                model.handle_key(key, terminal)?;
+            }
+        }
+        if model.quit {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Maps a crossterm key to the token bubbletea's msg.String() would have
+/// produced, so the key-handling logic below reads the same as the Go
+/// version's switch statements.
+fn key_token(key: KeyEvent) -> String {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let KeyCode::Char(c) = key.code {
+            return format!("ctrl+{c}");
+        }
+    }
+    match key.code {
+        KeyCode::Esc => "esc".into(),
+        KeyCode::Enter => "enter".into(),
+        KeyCode::Tab => "tab".into(),
+        KeyCode::Up => "up".into(),
+        KeyCode::Down => "down".into(),
+        KeyCode::PageUp => "pgup".into(),
+        KeyCode::PageDown => "pgdown".into(),
+        KeyCode::Backspace => "backspace".into(),
+        KeyCode::Char(c) => c.to_string(),
+        _ => String::new(),
+    }
+}
+
+type Term = Terminal<CrosstermBackend<std::io::Stdout>>;
+
+impl Model {
+    fn new(deps: Deps) -> Self {
+        let theme = theme::apply(&deps.config.theme);
+        let status = if deps.problems.is_empty() {
+            "No problems cached. Quit and run: cpx sync".to_string()
+        } else {
+            "j/k move · / filter · tab practice · o open · t test · s submit · b browser · q quit".to_string()
+        };
+        let mut m = Model {
+            deps,
+            tab: Tab::Problems,
+            visible: Vec::new(),
+            picks: Vec::new(),
+            mode: 0,
+            cursor: 0,
+            filtering: false,
+            filter: String::new(),
+            status,
+            ran_id: String::new(),
+            results: Vec::new(),
+            cfg_editing: false,
+            cfg_input: String::new(),
+            stmt_open: false,
+            stmt_key: String::new(),
+            stmt_blocks: Vec::new(),
+            stmt_samples: Vec::new(),
+            stmt_scroll: 0,
+            detail_scroll: 0,
+            width: 0,
+            height: 0,
+            theme,
+            quit: false,
+        };
+        m.apply_filter();
+        m
+    }
+
+    fn handle_key(&mut self, key: KeyEvent, terminal: &mut Term) -> Result<()> {
+        if self.cfg_editing {
+            self.update_config_edit(key);
+            return Ok(());
+        }
+        if self.filtering {
+            self.update_filter(key);
+            return Ok(());
+        }
+        self.update_normal(key, terminal)
+    }
+
+    fn update_filter(&mut self, key: KeyEvent) {
+        match key_token(key).as_str() {
+            "esc" => {
+                self.filtering = false;
+                self.filter.clear();
+                self.apply_filter();
+            }
+            "enter" => self.filtering = false,
+            "ctrl+c" => self.quit = true,
+            "backspace" => {
+                self.filter.pop();
+                self.apply_filter();
+            }
+            _ => {
+                if let KeyCode::Char(c) = key.code {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        self.filter.push(c);
+                        self.apply_filter();
+                    }
+                }
+            }
+        }
+    }
+
+    fn update_config_edit(&mut self, key: KeyEvent) {
+        match key_token(key).as_str() {
+            "esc" => self.cfg_editing = false,
+            "enter" => {
+                self.cfg_editing = false;
+                let value = self.cfg_input.trim().to_string();
+                let label = config_view::FIELDS[self.cursor].label;
+                config_view::set(&mut self.deps.config, self.cursor, value);
+                self.after_config_change(label);
+            }
+            "ctrl+c" => self.quit = true,
+            "backspace" => {
+                self.cfg_input.pop();
+            }
+            _ => {
+                if let KeyCode::Char(c) = key.code {
+                    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                        self.cfg_input.push(c);
+                    }
+                }
+            }
+        }
+    }
+
+    fn update_statement(&mut self, key: KeyEvent) {
+        match key_token(key).as_str() {
+            "q" | "ctrl+c" => self.quit = true,
+            "v" | "esc" => self.stmt_open = false,
+            "m" => self.cycle_mode(),
+            "j" | "down" => self.stmt_scroll += 1,
+            "k" | "up" => self.stmt_scroll = text::clamp(self.stmt_scroll - 1, 0, 1 << 20),
+            "d" | "pgdown" => self.stmt_scroll += 10,
+            "u" | "pgup" => self.stmt_scroll = text::clamp(self.stmt_scroll - 10, 0, 1 << 20),
+            "g" => self.stmt_scroll = 0,
+            "G" => self.stmt_scroll = 1 << 20,
+            _ => {}
+        }
+    }
+
+    fn cycle_mode(&mut self) {
+        self.stmt_open = false;
+        if self.tab != Tab::Practice {
+            self.tab = Tab::Practice;
+            self.cursor = 0;
+        }
+        self.mode = (self.mode + 1) % practice::MODES.len();
+        self.recompute_picks();
+    }
+
+    fn update_normal(&mut self, key: KeyEvent, terminal: &mut Term) -> Result<()> {
+        if self.stmt_open {
+            self.update_statement(key);
+            return Ok(());
+        }
+        let token = key_token(key);
+        match token.as_str() {
+            "d" => {
+                self.detail_scroll += 5;
+                return Ok(());
+            }
+            "u" => {
+                self.detail_scroll = (self.detail_scroll - 5).max(0);
+                return Ok(());
+            }
+            _ => {}
+        }
+        self.detail_scroll = 0;
+
+        if self.tab == Tab::Config && token == "enter" {
+            self.activate_config();
+            return Ok(());
+        }
+        if self.tab == Tab::Contests && matches!(token.as_str(), "enter" | "o" | "b") {
+            if let Some(k) = self.selected_contest() {
+                match system::open_url(&k.url) {
+                    Ok(()) => self.status = format!("Opened {}", k.name),
+                    Err(e) => self.status = format!("Browser: {e}"),
+                }
+            }
+            return Ok(());
+        }
+
+        match token.as_str() {
+            "q" | "ctrl+c" => self.quit = true,
+            "tab" => self.switch_tab(),
+            "m" => self.cycle_mode(),
+            "j" | "down" => {
+                if self.cursor + 1 < self.row_count() {
+                    self.cursor += 1;
+                }
+            }
+            "k" | "up" => {
+                if self.cursor > 0 {
+                    self.cursor -= 1;
+                }
+            }
+            "g" => self.cursor = 0,
+            "G" => {
+                let n = self.row_count();
+                if n > 0 {
+                    self.cursor = n - 1;
+                }
+            }
+            "/" => {
+                if self.tab == Tab::Problems {
+                    self.filtering = true;
+                }
+            }
+            "o" | "enter" => self.do_open(terminal)?,
+            "t" => self.do_run(terminal)?,
+            "v" => self.do_statement(terminal)?,
+            "s" => self.do_submit(terminal)?,
+            "b" => {
+                if let Some(p) = self.selected() {
+                    if let Err(e) = system::open_url(&p.url) {
+                        self.status = format!("Browser: {e}");
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn show_busy(&mut self, terminal: &mut Term, status: impl Into<String>) -> Result<()> {
+        self.status = status.into();
+        terminal.draw(|f| view::draw(f, self))?;
+        Ok(())
+    }
+
+    fn do_open(&mut self, terminal: &mut Term) -> Result<()> {
+        let Some(p) = self.selected() else { return Ok(()) };
+        self.show_busy(terminal, format!("Opening {}…", p.id))?;
+        match open_solution(&self.deps, &p) {
+            Ok((path, samples)) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.status = format!("Opened {name} · {samples} sample(s)");
+            }
+            Err(e) => self.status = format!("Open: {e}"),
+        }
+        Ok(())
+    }
+
+    fn do_run(&mut self, terminal: &mut Term) -> Result<()> {
+        let Some(p) = self.selected() else { return Ok(()) };
+        self.show_busy(terminal, format!("Running {}…", p.id))?;
+        match run_solution(&self.deps, &p) {
+            Ok(results) => {
+                let passed = results.iter().filter(|r| r.passed).count();
+                self.status = format!("Tests: {passed}/{} passed", results.len());
+                self.ran_id = p.id.clone();
+                self.results = results;
+            }
+            Err(e) => {
+                self.results.clear();
+                self.status = format!("Test: {e}");
+            }
+        }
+        Ok(())
+    }
+
+    fn do_submit(&mut self, terminal: &mut Term) -> Result<()> {
+        let Some(p) = self.selected() else { return Ok(()) };
+        self.show_busy(terminal, format!("Submitting {}…", p.id))?;
+        match submit_solution(&self.deps, &p) {
+            Ok(url) => self.status = format!("Code copied. Paste on the judge page: {url}"),
+            Err(e) => self.status = format!("Submit: {e}"),
+        }
+        Ok(())
+    }
+
+    fn do_statement(&mut self, terminal: &mut Term) -> Result<()> {
+        let Some(p) = self.selected() else { return Ok(()) };
+        let key = format!("{}{}", p.platform, p.id);
+        if self.stmt_open && self.stmt_key == key {
+            self.stmt_open = false;
+            return Ok(());
+        }
+        self.stmt_key = key;
+        self.show_busy(terminal, format!("Loading statement for {}…", p.id))?;
+        let (blocks, samples, err) = statement_view::load(&self.deps.config_dir, &self.deps.root, &self.deps.config, &p);
+        if let Some(e) = err {
+            self.stmt_open = false;
+            self.status = format!("Statement: {e}");
+        } else {
+            self.stmt_blocks = blocks;
+            self.stmt_samples = samples;
+            self.stmt_scroll = 0;
+            self.stmt_open = true;
+            self.status = "Statement open · j/k scroll · v closes".to_string();
+        }
+        Ok(())
+    }
+
+    fn switch_tab(&mut self) {
+        self.stmt_open = false;
+        self.tab = self.tab.next();
+        if self.tab == Tab::Practice {
+            self.recompute_picks();
+        }
+        self.cursor = 0;
+    }
+
+    fn is_stats_tab(&self) -> bool {
+        matches!(self.tab, Tab::Contests | Tab::Analytics | Tab::Dashboard | Tab::Config)
+    }
+
+    fn row_count(&self) -> usize {
+        match self.tab {
+            Tab::Practice => self.picks.len(),
+            Tab::Problems => self.visible.len(),
+            Tab::Contests => contests_view::upcoming(&self.deps.contests, Utc::now().timestamp()).len(),
+            Tab::Config => config_view::FIELDS.len(),
+            _ => 0,
+        }
+    }
+
+    fn recompute_picks(&mut self) {
+        let input = self.practice_input();
+        let mode = practice::MODES[self.mode];
+        self.picks = practice::recommend(&input, mode, 30);
+        self.cursor = 0;
+        if self.picks.is_empty() {
+            self.status = format!("{}: no recommendations (sync more, or try another mode with m)", mode.label());
+        } else {
+            self.status = format!("{}: {} picks · m next mode", mode.label(), self.picks.len());
+        }
+    }
+
+    fn practice_input(&self) -> practice::Input {
+        let mut input = practice::Input { problems: self.deps.problems.clone(), now: Utc::now().timestamp(), ..Default::default() };
+        for s in &self.deps.submissions {
+            let key = format!("{}{}", s.platform, s.problem_id);
+            let e = input.attempted.entry(key.clone()).or_insert(0);
+            if s.submitted_at > *e {
+                *e = s.submitted_at;
+            }
+            if s.verdict == "OK" {
+                input.accepted.insert(key);
+            }
+        }
+        for id in &self.deps.cses_solved {
+            input.accepted.insert(format!("cses{id}"));
+        }
+        if let Some(r) = self.deps.rating_changes.last() {
+            input.rating = r.new_rating;
+        }
+        input
+    }
+
+    fn apply_filter(&mut self) {
+        let keep = if self.tab == Tab::Problems { self.selected().map(|p| format!("{}{}", p.platform, p.id)) } else { None };
+        let q = self.filter.trim().to_lowercase();
+        self.visible.clear();
+        for (i, p) in self.deps.problems.iter().enumerate() {
+            if q.is_empty() || matches_query(p, &q) {
+                self.visible.push(i);
+            }
+        }
+        self.cursor = 0;
+        if let Some(keep) = keep {
+            for (i, &idx) in self.visible.iter().enumerate() {
+                let p = &self.deps.problems[idx];
+                if format!("{}{}", p.platform, p.id) == keep {
+                    self.cursor = i;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn selected(&self) -> Option<Problem> {
+        if self.tab != Tab::Problems && self.tab != Tab::Practice {
+            return None;
+        }
+        if self.cursor >= self.row_count() {
+            return None;
+        }
+        if self.tab == Tab::Practice {
+            return Some(self.picks[self.cursor].problem.clone());
+        }
+        Some(self.deps.problems[self.visible[self.cursor]].clone())
+    }
+
+    fn row_problem(&self, i: usize) -> Problem {
+        if self.tab == Tab::Practice {
+            self.picks[i].problem.clone()
+        } else {
+            self.deps.problems[self.visible[i]].clone()
+        }
+    }
+
+    fn selected_contest(&self) -> Option<Contest> {
+        contests_view::upcoming(&self.deps.contests, Utc::now().timestamp()).get(self.cursor).cloned()
+    }
+
+    fn right_scroll(&self) -> i64 {
+        if self.stmt_open {
+            self.stmt_scroll
+        } else {
+            self.detail_scroll
+        }
+    }
+
+    fn statement_problem(&self) -> Option<Problem> {
+        self.deps.problems.iter().find(|p| format!("{}{}", p.platform, p.id) == self.stmt_key).cloned()
+    }
+
+    fn activate_config(&mut self) {
+        if self.cursor >= config_view::FIELDS.len() {
+            return;
+        }
+        let f = &config_view::FIELDS[self.cursor];
+        if !f.choice {
+            self.cfg_editing = true;
+            self.cfg_input = config_view::get(&self.deps.config, self.cursor);
+            return;
+        }
+        let opts = config_view::options(&self.deps.config, self.cursor);
+        if opts.is_empty() {
+            return;
+        }
+        let current = config_view::get(&self.deps.config, self.cursor);
+        let mut next = opts[0].clone();
+        for (i, o) in opts.iter().enumerate() {
+            if *o == current {
+                next = opts[(i + 1) % opts.len()].clone();
+                break;
+            }
+        }
+        let label = config_view::FIELDS[self.cursor].label;
+        config_view::set(&mut self.deps.config, self.cursor, next);
+        self.after_config_change(label);
+    }
+
+    fn after_config_change(&mut self, label: &str) {
+        if self.deps.config.theme.is_empty() {
+            self.deps.config.theme = "catppuccin".to_string();
+        }
+        self.theme = theme::apply(&self.deps.config.theme);
+        if let Ok(root) = workspace::root(&self.deps.config) {
+            self.deps.root = root;
+        }
+        if self.deps.config_path.as_os_str().is_empty() {
+            self.status = format!("{label} changed (not saved: no config path)");
+            return;
+        }
+        match config::save(&self.deps.config_path, &self.deps.config) {
+            Ok(()) => self.status = format!("{label} saved"),
+            Err(e) => self.status = format!("Save failed: {e}"),
+        }
+    }
+}
+
+fn matches_query(p: &Problem, q: &str) -> bool {
+    if p.id.to_lowercase().contains(q) || p.name.to_lowercase().contains(q) {
+        return true;
+    }
+    p.tags.iter().any(|t| t.to_lowercase().contains(q))
+}
+
+/// The configured language's compile settings, or an error naming the problem.
+fn language(cfg: &Config) -> Result<&crate::config::CompileCommand> {
+    cfg.compile_commands
+        .get(&cfg.default_language)
+        .ok_or_else(|| anyhow::anyhow!("no compile settings for {:?} in config", cfg.default_language))
+}
+
+/// Creates the solution from a template if missing, saves samples, and opens
+/// the file in the editor. An existing solution is never overwritten.
+fn open_solution(deps: &Deps, p: &Problem) -> Result<(PathBuf, usize)> {
+    let cc = language(&deps.config)?;
+    let path = workspace::solution_path(&deps.root, p, &cc.extension);
+    let tpl = workspace::template(&deps.config.default_language);
+    workspace::scaffold(&path, tpl)?;
+
+    let mut samples = workspace::load_samples(&path)?;
+    if samples.is_empty() {
+        samples = dispatch::fetch_samples(p).map_err(|e| anyhow::anyhow!("fetch samples: {e}"))?;
+        workspace::save_samples(&path, &samples)?;
+    }
+    system::open_in_editor(&deps.config.editor, &path.to_string_lossy()).map_err(|e| anyhow::anyhow!("editor: {e}"))?;
+    Ok((path, samples.len()))
+}
+
+/// Compiles the solution and runs it against the saved samples.
+fn run_solution(deps: &Deps, p: &Problem) -> Result<Vec<CaseResult>> {
+    let cc = language(&deps.config)?;
+    let path = workspace::solution_path(&deps.root, p, &cc.extension);
+    let samples = workspace::load_samples(&path)?;
+    if samples.is_empty() {
+        return Err(anyhow::anyhow!("no samples yet: press o first"));
+    }
+    let build_dir = deps.config_dir.join("build");
+    std::fs::create_dir_all(&build_dir)?;
+    let spec = runner::Spec { compile: &cc.compile, run: &cc.run, source: &path, dir: &build_dir };
+    runner::run_samples(&spec, &samples, StdDuration::from_secs(5))
+}
+
+/// Copies the solution to the clipboard and opens the judge's submit page.
+/// CPX does not post to the judge itself.
+fn submit_solution(deps: &Deps, p: &Problem) -> Result<String> {
+    let cc = language(&deps.config)?;
+    let url = dispatch::submit_url(p).ok_or_else(|| anyhow::anyhow!("no submit page known for this problem"))?;
+    let path = workspace::solution_path(&deps.root, p, &cc.extension);
+    let code = std::fs::read_to_string(&path).map_err(|_| anyhow::anyhow!("no solution file yet: press o first"))?;
+    system::copy_clipboard(&code).map_err(|e| anyhow::anyhow!("clipboard: {e}"))?;
+    system::open_url(&url).map_err(|e| anyhow::anyhow!("browser: {e}"))?;
+    Ok(url)
+}
+
+/// Builds Deps from the cached data: the TUI's entry point from main.
+pub fn load_deps(cache: &Cache, cfg: Config, config_dir: PathBuf, config_path: PathBuf) -> Result<Deps> {
+    let mut problems = Vec::new();
+    for platform in ["codeforces", "cses", "atcoder"] {
+        problems.extend(cache.list_problems(platform)?);
+    }
+    let root = workspace::root(&cfg)?;
+    let contests = cache.list_contests("codeforces")?;
+    let cses_solved: Vec<String> = cache
+        .get_meta("cses_progress")?
+        .and_then(|raw| serde_json::from_str::<crate::judge::cses::Progress>(&raw).ok())
+        .map(|p| p.solved)
+        .unwrap_or_default();
+    let submissions = cache.list_submissions("codeforces")?;
+    let rating_changes = cache.list_rating_changes("codeforces")?;
+    Ok(Deps { problems, submissions, rating_changes, contests, cses_solved, config: cfg, config_dir, config_path, root })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+
+    fn screen(m: &mut Model, w: u16, h: u16) -> String {
+        m.width = w;
+        m.height = h;
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| view::draw(f, m)).unwrap();
+        let buf = term.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect::<String>().trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn sample_deps() -> Deps {
+        let problems = (1..=40)
+            .map(|i| Problem {
+                platform: "codeforces".into(),
+                id: format!("{}A", 1900 + i),
+                name: format!("Problem number {i}"),
+                url: String::new(),
+                rating: 800 + (i % 10) * 100,
+                tags: vec!["greedy".into(), "math".into()],
+                category: String::new(),
+            })
+            .collect();
+        Deps {
+            problems,
+            submissions: Vec::new(),
+            rating_changes: Vec::new(),
+            contests: Vec::new(),
+            cses_solved: Vec::new(),
+            config: Config::default(),
+            config_dir: PathBuf::new(),
+            config_path: PathBuf::new(),
+            root: PathBuf::new(),
+        }
+    }
+
+    // Every tab renders at a normal and a cramped size without panicking,
+    // and the Problems list shows its rows.
+    #[test]
+    fn every_tab_renders() {
+        let mut m = Model::new(sample_deps());
+        for (w, h) in [(120, 35), (40, 10), (10, 4)] {
+            for tab in TABS {
+                m.tab = tab;
+                m.cursor = 0;
+                screen(&mut m, w, h);
+            }
+        }
+        m.tab = Tab::Problems;
+        let s = screen(&mut m, 120, 35);
+        assert!(s.contains("Problem number 1"), "{s}");
+        assert!(s.contains("Problems"), "{s}");
+    }
+
+    // Eyeball check against the real cache: cargo test dump_real -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn dump_real() {
+        let path = crate::config::path().unwrap();
+        let cfg = crate::config::load(&path).unwrap();
+        let dir = path.parent().unwrap().to_path_buf();
+        let cache = Cache::open(&dir.join("cache.db")).unwrap();
+        let mut m = Model::new(load_deps(&cache, cfg, dir, PathBuf::new()).unwrap());
+        for tab in TABS {
+            m.tab = tab;
+            m.cursor = 0;
+            m.recompute_picks();
+            println!("===== {tab:?} =====\n{}", screen(&mut m, 110, 30));
+        }
+    }
+}

@@ -1,0 +1,12 @@
+# Rust build output
+rs/target/
+
+# VS Code extension build output and deps
+extensions/vscode/node_modules/
+extensions/vscode/out/
+*.vsix
+
+# Personal solution workspaces
+codeforces/
+cses/
+atcoder/
