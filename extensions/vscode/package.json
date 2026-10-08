@@ -12,7 +12,7 @@
     "Education",
     "Programming Languages"
   ],
-  "main": "./out/extension.js",
+  "main": "./out/src/extension.js",
   "activationEvents": [],
   "contributes": {
     "commands": [
@@ -70,7 +70,8 @@
   },
   "scripts": {
     "build": "tsc -p .",
-    "test": "npm run build && node --test out/test/cpx.test.js"
+    "test": "npm run build && node --test out/test/cpx.test.js",
+    "package": "npm run build && vsce package"
   },
   "dependencies": {
     "cheerio": "^1.0.0"
@@ -78,6 +79,11 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^4.0.0",
     "typescript": "^5.6.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/adarsh-67r/cpx"
   }
 }

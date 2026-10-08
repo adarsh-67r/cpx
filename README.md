@@ -101,8 +101,13 @@ A standalone extension in [`extensions/vscode`](extensions/vscode). It doesn't n
 - **CPX: Show Statement**: the problem beside your code
 - **CPX: Copy Code and Open Submit Page**
 
+**Install:** download `cpx-vscode-*.vsix` from the [latest release](https://github.com/adarsh-67r/cpx/releases),
+then in VS Code open Extensions → `⋯` → **Install from VSIX…**
+
+**From source:**
+
 ```sh
-cd extensions/vscode && npm install && npm run build   # then press F5 in VS Code
+cd extensions/vscode && npm install && npm run package   # builds cpx-vscode-*.vsix; or press F5 to try it
 ```
 
 ## Fair play
