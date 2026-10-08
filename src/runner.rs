@@ -136,15 +136,21 @@ fn run_one(line: &str, dir: &Path, index: usize, s: &Sample, limit: Duration) ->
     res
 }
 
-/// Kills the child and, on Windows, everything it started.
+/// Kills the child and everything it started. Killing only the shell would
+/// leave the program running and holding the output pipes open.
 fn kill_tree(child: &mut std::process::Child) {
-    if cfg!(windows) {
-        let _ = Command::new("taskkill")
-            .args(["/T", "/F", "/PID", &child.id().to_string()])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
+    let pid = child.id().to_string();
+    let mut cmd = if cfg!(windows) {
+        let mut c = Command::new("taskkill");
+        c.args(["/T", "/F", "/PID", &pid]);
+        c
+    } else {
+        // shell() put the child in its own process group; -pid is that group.
+        let mut c = Command::new("kill");
+        c.args(["-KILL", &format!("-{pid}")]);
+        c
+    };
+    let _ = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status();
     let _ = child.kill();
 }
 
@@ -156,6 +162,8 @@ fn shell(line: &str, dir: &Path) -> Command {
     } else {
         let mut c = Command::new("sh");
         c.args(["-c", line]);
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut c, 0);
         c
     };
     cmd.current_dir(dir);
