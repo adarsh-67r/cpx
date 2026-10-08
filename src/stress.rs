@@ -68,7 +68,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let w = |name: &str, body: &str| {
             let p = dir.join(name);
-            std::fs::write(&p, format!("#include <bits/stdc++.h>\nusing namespace std;\nint main(int argc, char** argv) {{ {body} }}\n")).unwrap();
+            std::fs::write(&p, format!("#include <iostream>\n#include <cstdlib>\nusing namespace std;\nint main(int argc, char** argv) {{ {body} }}\n")).unwrap();
             p
         };
         let gen = w("gen.cpp", "cout << atoi(argv[1]) << endl;");
